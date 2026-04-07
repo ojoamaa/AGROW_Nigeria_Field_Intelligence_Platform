@@ -1,0 +1,11 @@
+Farmer_ID,NIN_Linked,Name,LGA,State,Crop_Type,Farm_Size_Ha,NIN_Status,Input_Distributed,Quantity_Units,Lat,Lon
+KN-001,94717752350,Sani Abdullahi,Kura,Kano,Rice,2.8,Verified,NPK Fertilizer,10,11.7700,8.4200
+KD-001,36424918065,Binta Ibrahim,Giwa,Kaduna,Maize,4.0,Verified,Urea Fertilizer,15,11.2721,7.4283
+CR-001,23173298391,Effiong Okon,Akpabuyo,Cross River,Cocoa,5.5,Pending,Seeds,8,4.9100,8.4200
+LA-001,79308704590,Olumide Ade,Ikorodu,Lagos,Cassava,1.5,Verified,Manure,20,6.6194,3.5029
+PL-001,68746599283,Nanle Luka,Bokkos,Plateau,Potato,3.2,Verified,NPK Fertilizer,12,9.3000,8.9600
+RV-001,55546599211,Blessing Tamuno,Obio-Akpor,Rivers,Rice,2.5,Verified,Seeds,10,4.8156,7.0498
+OY-001,44446599222,Olawale Tunde,Iseyin,Oyo,Cassava,4.0,Verified,Urea Fertilizer,14,7.9110,3.5911
+FC-001,33346599333,Musa Danjuma,Gwagwalada,FCT,Maize,3.0,Verified,NPK Fertilizer,12,8.9475,7.0764
+BO-001,22246599444,Abubakar Kyari,Biu,Borno,Wheat,6.0,Pending,Seeds,25,10.6129,12.1946
+EN-001,11146599555,Chidi Okafor,Udi,Enugu,Yam,2.0,Verified,Manure,18,6.3125,7.4285

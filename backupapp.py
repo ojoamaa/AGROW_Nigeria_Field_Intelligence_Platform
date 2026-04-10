@@ -187,41 +187,23 @@ st.markdown(
     }}
 
     @media (max-width: 768px) {{
-    .main-title {{
-        font-size: 20px !important;
-        line-height: 1.25 !important;
-    }}
+        .main-title {{
+            font-size: 24px !important;
+        }}
 
-    .sub-title {{
-        font-size: 12px !important;
-    }}
+        .sub-title {{
+            font-size: 13px !important;
+        }}
 
-    .small-note {{
-        font-size: 11px !important;
-    }}
+        .small-note {{
+            font-size: 12px !important;
+        }}
 
-    .auth-card {{
-        max-width: 100% !important;
-        padding: 14px !important;
-        border-radius: 12px !important;
+        [data-testid="stSidebar"] {{
+            min-width: 100% !important;
+            max-width: 100% !important;
+        }}
     }}
-
-    .stTextInput input,
-    .stNumberInput input,
-    .stDateInput input,
-    .stTextArea textarea {{
-        font-size: 16px !important;
-    }}
-
-    button[kind="primary"] {{
-        min-height: 48px !important;
-    }}
-
-    [data-testid="stSidebar"] {{
-        min-width: 100% !important;
-        max-width: 100% !important;
-    }}
-}}
 
     .footer {{
         position: fixed;
@@ -781,7 +763,7 @@ def show_auth():
         unsafe_allow_html=True
     )
 
-    tab1, tab2, tab3 = st.tabs(["Login", "Signup", "Password"])
+    tab1, tab2, tab3 = st.tabs(["🔐 Login", "📝 Agent Signup", "🔑 Change Password"])
 
     with tab1:
         login_user = st.text_input("Username", key="login_username")
@@ -964,29 +946,17 @@ else:
         selected_state = user_meta.get("state", "All Nigeria")
         st.sidebar.info(f"Access restricted to {normalize_state_name(selected_state)}")
 
-    st.markdown(
-        """
-        <div style="text-align:center; margin-bottom: 18px;">
-            <div style="font-size:32px; font-weight:900; color:#004B87;">
-                AGROW Nigeria Digital Field Intelligence Platform
-            </div>
-            <div style="font-size:16px; font-weight:700; color:#1B5E20;">
-                Ministry Deployment Prototype for National Farmer Registration and Input Monitoring
-            </div>
-            <div style="font-size:14px; color:#555;">
-                Supporting beneficiary verification, field intelligence capture, geospatial tracking and agent coordination
-            </div>
-        </div>
-        """,
-        unsafe_allow_html=True
-    )
+    with st.sidebar.expander("📝 Secure Field Registration", expanded=True):
+        enable_camera = st.checkbox("Enable Camera")
 
-    tab_dashboard, tab_register, tab_distribution, tab_analytics = st.tabs(
-        ["📊 Dashboard", "📝 Register Farmer", "📦 Distribution", "📈 Analytics"]
-    )
-
-    with tab_register:
-        st.info("For mobile users, complete the form section-by-section and tap 'Sync Secure Record' at the bottom.")
+        st.markdown(
+            """
+            <div class="sidebar-form-note">
+                Complete all farmer identity, location, and support details before syncing the record.
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
 
         with st.form("field_registration_form", clear_on_submit=True):
             st.markdown("### 1. Farmer Bio-Data")
@@ -1000,7 +970,6 @@ else:
 
             st.markdown("---")
             st.markdown("### 2. Coverage and Location")
-
             if role == "admin":
                 farmer_state = st.selectbox("State", state_options)
             else:
@@ -1022,7 +991,7 @@ else:
                 "Secondary Crop",
                 ["None", "Rice", "Maize", "Cassava", "Sorghum", "Soybean", "Groundnut", "Millet"]
             )
-            farm_size = st.text_input("Farm Size (Hectares)", placeholder="e.g. 2.5")
+            farm_size = st.number_input("Farm Size (Hectares)", min_value=0.1, step=0.1)
 
             st.markdown("---")
             st.markdown("### 4. Support Delivered")
@@ -1046,7 +1015,7 @@ else:
                     "Extension Support"
                 ]
             )
-            quantity_units = st.text_input("Total Input Units", placeholder="e.g. 8")
+            quantity_units = st.number_input("Total Input Units", min_value=1, step=1)
 
             st.markdown("---")
             st.markdown("### 5. Verification")
@@ -1059,91 +1028,78 @@ else:
 
             st.markdown("---")
             st.markdown("### 6. Geo-tagging and Notes")
-            enable_camera_main = st.checkbox("Enable Camera")
-            photo_capture = st.camera_input("Capture Farmer Photo") if enable_camera_main else None
-
-            latitude = st.text_input("Latitude", placeholder="e.g. 11.990000")
-            longitude = st.text_input("Longitude", placeholder="e.g. 8.520000")
+            latitude = st.number_input("Latitude", format="%.6f")
+            longitude = st.number_input("Longitude", format="%.6f")
             remarks = st.text_area("Enumerator Remarks")
+            photo_capture = st.camera_input("Capture Farmer Photo") if enable_camera else None
 
             submitted = st.form_submit_button("Sync Secure Record", use_container_width=True)
 
             if submitted:
                 if not farmer_full_name.strip():
                     st.error("Farmer full name is required.")
-                    st.stop()
-
-                if not valid_phone(phone_number):
+                elif not valid_phone(phone_number):
                     st.error("A valid phone number is required.")
-                    st.stop()
-
-                if not valid_nin(nin):
+                elif not valid_nin(nin):
                     st.error("NIN must be exactly 11 digits.")
-                    st.stop()
-
-                if not farmer_lga:
+                elif not farmer_lga:
                     st.error("LGA is required.")
-                    st.stop()
-
-                if len(input_list) == 0:
+                elif len(input_list) == 0:
                     st.error("Please select at least one distributed input.")
-                    st.stop()
+                else:
+                    now = datetime.now()
+                    farmer_id = f"AG-{now.strftime('%Y%m%d%H%M%S')}"
 
-                try:
-                    farm_size_val = float(farm_size)
-                except ValueError:
-                    st.error("Farm Size must be a valid number.")
-                    st.stop()
+                    row = {
+                        "Farmer_ID": farmer_id,
+                        "Registration_Date": now.strftime("%Y-%m-%d %H:%M:%S"),
+                        "Agent_ID": user_id,
+                        "Farmer_Full_Name": farmer_full_name,
+                        "Gender": gender,
+                        "Date_of_Birth": str(dob),
+                        "Phone_Number": phone_number,
+                        "Alternate_Phone": alternate_phone,
+                        "Email_Address": email_address,
+                        "NIN": nin,
+                        "State": farmer_state,
+                        "LGA": farmer_lga,
+                        "Ward": ward,
+                        "Community_Village": community,
+                        "Residential_Address": residential_address,
+                        "Primary_Crop": primary_crop,
+                        "Secondary_Crop": secondary_crop,
+                        "Farm_Size_Ha": farm_size,
+                        "Input_Distributed": ", ".join(input_list),
+                        "Quantity_Units": quantity_units,
+                        "NIN_Status": nin_status,
+                        "ID_Type": id_type,
+                        "ID_Number": id_number,
+                        "Latitude": latitude,
+                        "Longitude": longitude,
+                        "Enumerator_Remarks": remarks,
+                        "Photo_Status": "Captured" if photo_capture else "No Photo"
+                    }
 
-                try:
-                    quantity_units_val = int(quantity_units)
-                except ValueError:
-                    st.error("Total Input Units must be a whole number.")
-                    st.stop()
+                    insert_farmer(row)
+                    log_action(user_id, "FARMER_REGISTERED", farmer_id)
+                    st.success("✅ Farmer record synced successfully.")
 
-                try:
-                    latitude_val = float(latitude)
-                    longitude_val = float(longitude)
-                except ValueError:
-                    st.error("Latitude and Longitude must be valid numbers.")
-                    st.stop()
-
-                now = datetime.now()
-                farmer_id = f"AG-{now.strftime('%Y%m%d%H%M%S')}"
-
-                row = {
-                    "Farmer_ID": farmer_id,
-                    "Registration_Date": now.strftime("%Y-%m-%d %H:%M:%S"),
-                    "Agent_ID": user_id,
-                    "Farmer_Full_Name": farmer_full_name,
-                    "Gender": gender,
-                    "Date_of_Birth": str(dob),
-                    "Phone_Number": phone_number,
-                    "Alternate_Phone": alternate_phone,
-                    "Email_Address": email_address,
-                    "NIN": nin,
-                    "State": farmer_state,
-                    "LGA": farmer_lga,
-                    "Ward": ward,
-                    "Community_Village": community,
-                    "Residential_Address": residential_address,
-                    "Primary_Crop": primary_crop,
-                    "Secondary_Crop": secondary_crop,
-                    "Farm_Size_Ha": farm_size_val,
-                    "Input_Distributed": ", ".join(input_list),
-                    "Quantity_Units": quantity_units_val,
-                    "NIN_Status": nin_status,
-                    "ID_Type": id_type,
-                    "ID_Number": id_number,
-                    "Latitude": latitude_val,
-                    "Longitude": longitude_val,
-                    "Enumerator_Remarks": remarks,
-                    "Photo_Status": "Captured" if photo_capture else "No Photo"
-                }
-
-                insert_farmer(row)
-                log_action(user_id, "FARMER_REGISTERED", farmer_id)
-                st.success("✅ Farmer record synced successfully.")
+    st.markdown(
+        """
+        <div style="text-align:center; margin-bottom: 18px;">
+            <div style="font-size:32px; font-weight:900; color:#004B87;">
+                AGROW Nigeria Digital Field Intelligence Platform
+            </div>
+            <div style="font-size:16px; font-weight:700; color:#1B5E20;">
+                Ministry Deployment Prototype for National Farmer Registration and Input Monitoring
+            </div>
+            <div style="font-size:14px; color:#555;">
+                Supporting beneficiary verification, field intelligence capture, geospatial tracking and agent coordination
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
 
     df = fetch_farmers()
 
@@ -1158,22 +1114,24 @@ else:
     total_land = float(df["farm_size_ha"].sum()) if not df.empty else 0.0
     verification_rate = round((total_verified / total_beneficiaries) * 100, 1) if total_beneficiaries > 0 else 0.0
 
-    with tab_dashboard:
-        m1, m2, m3, m4 = st.columns(4)
-        m1.metric("Beneficiaries", total_beneficiaries)
-        m2.metric("Verified NIN", total_verified)
-        m3.metric("Land Coverage (Ha)", f"{total_land:.1f}")
-        m4.metric("Verification Rate", f"{verification_rate}%")
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Beneficiaries", total_beneficiaries)
+    m2.metric("Verified NIN", total_verified)
+    m3.metric("Land Coverage (Ha)", f"{total_land:.1f}")
+    m4.metric("Verification Rate", f"{verification_rate}%")
 
-        st.markdown("### National Monitoring Targets")
-        k1, k2, k3, k4 = st.columns(4)
-        k1.info("Target Beneficiaries: 1,000,000")
-        k2.info("Target States Covered: 36 + FCT")
-        k3.info("Target Verification Rate: 95%")
-        k4.info("Target Agent Uptime: 99%")
+    st.markdown("### National Monitoring Targets")
+    k1, k2, k3, k4 = st.columns(4)
+    k1.info("Target Beneficiaries: 1,000,000")
+    k2.info("Target States Covered: 36 + FCT")
+    k3.info("Target Verification Rate: 95%")
+    k4.info("Target Agent Uptime: 99%")
 
-        st.divider()
+    st.divider()
 
+    tab_a, tab_b, tab_c = st.tabs(["📍 Mapping", "📦 Distribution", "📊 Analytics"])
+
+    with tab_a:
         st.subheader("Geospatial Mapping")
         if not df.empty:
             map_df = df.rename(columns={"latitude": "lat", "longitude": "lon"})
@@ -1181,13 +1139,7 @@ else:
         else:
             st.info("No field data available for mapping.")
 
-        st.markdown("### Executive Summary")
-        st.success(
-            "This prototype demonstrates a ministry-ready digital workflow for farmer enrollment, "
-            "beneficiary verification, input tracking, field agent coordination, and geospatial oversight."
-        )
-
-    with tab_distribution:
+    with tab_b:
         st.subheader("Input Breakdown")
         if not df.empty:
             input_counts = df["input_distributed"].str.split(", ").explode().value_counts().reset_index()
@@ -1203,40 +1155,7 @@ else:
         else:
             st.info("No input distribution data available.")
 
-        st.subheader("📋 Master Registry Database")
-        display_df = df.rename(columns={
-            "farmer_id": "Farmer_ID",
-            "registration_date": "Registration_Date",
-            "agent_id": "Agent_ID",
-            "farmer_full_name": "Farmer_Full_Name",
-            "gender": "Gender",
-            "date_of_birth": "Date_of_Birth",
-            "phone_number": "Phone_Number",
-            "alternate_phone": "Alternate_Phone",
-            "email_address": "Email_Address",
-            "nin": "NIN",
-            "state": "State",
-            "lga": "LGA",
-            "ward": "Ward",
-            "community_village": "Community_Village",
-            "residential_address": "Residential_Address",
-            "primary_crop": "Primary_Crop",
-            "secondary_crop": "Secondary_Crop",
-            "farm_size_ha": "Farm_Size_Ha",
-            "input_distributed": "Input_Distributed",
-            "quantity_units": "Quantity_Units",
-            "nin_status": "NIN_Status",
-            "id_type": "ID_Type",
-            "id_number": "ID_Number",
-            "latitude": "Latitude",
-            "longitude": "Longitude",
-            "enumerator_remarks": "Enumerator_Remarks",
-            "photo_status": "Photo_Status"
-        })
-        st.dataframe(display_df, use_container_width=True)
-        table_to_csv_download(display_df, "agrow_master_registry.csv")
-
-    with tab_analytics:
+    with tab_c:
         c1, c2 = st.columns(2)
 
         with c1:
@@ -1259,15 +1178,54 @@ else:
             else:
                 st.info("No verification data available.")
 
-        if role == "admin":
-            st.subheader("👥 Registered Agents")
-            agent_df = fetch_all_agents()
-            if not agent_df.empty:
-                agent_df["State"] = agent_df["State"].apply(normalize_state_name)
-                st.dataframe(agent_df, use_container_width=True)
-                table_to_csv_download(agent_df, "agrow_registered_agents.csv")
-            else:
-                st.info("No registered agents yet.")
+    st.markdown("### Executive Summary")
+    st.success(
+        "This prototype demonstrates a ministry-ready digital workflow for farmer enrollment, "
+        "beneficiary verification, input tracking, field agent coordination, and geospatial oversight."
+    )
+
+    st.subheader("📋 Master Registry Database")
+    display_df = df.rename(columns={
+        "farmer_id": "Farmer_ID",
+        "registration_date": "Registration_Date",
+        "agent_id": "Agent_ID",
+        "farmer_full_name": "Farmer_Full_Name",
+        "gender": "Gender",
+        "date_of_birth": "Date_of_Birth",
+        "phone_number": "Phone_Number",
+        "alternate_phone": "Alternate_Phone",
+        "email_address": "Email_Address",
+        "nin": "NIN",
+        "state": "State",
+        "lga": "LGA",
+        "ward": "Ward",
+        "community_village": "Community_Village",
+        "residential_address": "Residential_Address",
+        "primary_crop": "Primary_Crop",
+        "secondary_crop": "Secondary_Crop",
+        "farm_size_ha": "Farm_Size_Ha",
+        "input_distributed": "Input_Distributed",
+        "quantity_units": "Quantity_Units",
+        "nin_status": "NIN_Status",
+        "id_type": "ID_Type",
+        "id_number": "ID_Number",
+        "latitude": "Latitude",
+        "longitude": "Longitude",
+        "enumerator_remarks": "Enumerator_Remarks",
+        "photo_status": "Photo_Status"
+    })
+    st.dataframe(display_df, use_container_width=True)
+    table_to_csv_download(display_df, "agrow_master_registry.csv")
+
+    if role == "admin":
+        st.subheader("👥 Registered Agents")
+        agent_df = fetch_all_agents()
+        if not agent_df.empty:
+            agent_df["State"] = agent_df["State"].apply(normalize_state_name)
+            st.dataframe(agent_df, use_container_width=True)
+            table_to_csv_download(agent_df, "agrow_registered_agents.csv")
+        else:
+            st.info("No registered agents yet.")
 
 st.markdown(
     '<div class="footer">© DataDev Limited | AGROW Field Intelligence Suite v4.0 | Ministry Deployment Prototype</div>',

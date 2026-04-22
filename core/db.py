@@ -75,6 +75,25 @@ def init_db():
     )
     """)
 
+    # Seed default admin user
+cursor.execute("SELECT * FROM users WHERE id = 'admin'")
+admin_exists = cursor.fetchone()
+
+if not admin_exists:
+    cursor.execute("""
+    INSERT INTO users (id, pw, role, full_name, phone, nin, state, lga, email)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (
+        "admin",
+        "agrow2026",
+        "admin",
+        "System Admin",
+        "00000000000",
+        "00000000000",
+        "FCT",
+        "Abuja",
+        "admin@datadev.com"
+    ))
     # Backward-safe column patch
     try:
         cursor.execute("ALTER TABLE farmers ADD COLUMN photo_path TEXT")

@@ -76,11 +76,11 @@ def init_db():
     """)
 
     # Seed default admin user
-cursor.execute("SELECT * FROM users WHERE id = 'admin'")
-admin_exists = cursor.fetchone()
+    cursor.execute("SELECT * FROM users WHERE id = 'admin'")
+    admin_exists = cursor.fetchone()
 
-if not admin_exists:
-    cursor.execute("""
+    if not admin_exists:
+     cursor.execute("""
     INSERT INTO users (id, pw, role, full_name, phone, nin, state, lga, email)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (

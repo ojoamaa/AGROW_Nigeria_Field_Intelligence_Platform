@@ -4,3 +4,7 @@ plotly
 sqlalchemy
 psycopg2-binary
 python-dotenv
+qrcode		
+pillow	
+openpyxl
+reportlab

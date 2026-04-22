@@ -1,20 +1,24 @@
 ﻿import os
 from io import BytesIO
 from datetime import datetime
-
-import pandas as pd
-import plotly.express as px
-import qrcode
-import streamlit as st
-from dotenv import load_dotenv
-from reportlab.lib.units import mm
-from reportlab.pdfgen import canvas
-from reportlab.lib.utils import ImageReader
-
-from nigeria_lga_data import NIGERIA_LGA_MAP
-from core.db import get_connection, init_db
 from services.log_service import log_action
 from services.id_service import generate_agent_id_db
+import qrcode
+from reportlab.lib.pagesizes import landscape
+from reportlab.pdfgen import canvas
+from reportlab.lib.utils import ImageReader
+import qrcode
+from reportlab.lib.pagesizes import A4
+from reportlab.pdfgen import canvas
+from reportlab.lib.utils import ImageReader
+import pandas as pd
+import plotly.express as px
+import streamlit as st
+from nigeria_lga_data import NIGERIA_LGA_MAP
+from core.db import get_connection, init_db
+
+from reportlab.lib.units import mm
+
 from services.farmer_service import (
     fetch_farmers,
     farmer_exists_today,
@@ -23,6 +27,7 @@ from services.farmer_service import (
     fetch_offline_queue,
     sync_offline_queue,
 )
+
 from services.user_service import (
     fetch_user,
     insert_user,
@@ -30,8 +35,6 @@ from services.user_service import (
     fetch_all_agents,
 )
 
-load_dotenv()
-APP_BASE_URL = os.getenv("APP_BASE_URL", "http://localhost:8501")
 init_db()
 # seed_default_users()
 
@@ -515,8 +518,7 @@ def generate_farmer_id_card_pdf(selected_row, photo_path, logo_path=None):
 
     # QR content
     farmer_id_value = selected_row.get("farmer_id", "")
-    APP_BASE_URL = os.getenv("APP_BASE_URL", "http://localhost:8501")
-    verification_url = f"{APP_BASE_URL}/?farmer_id={farmer_id_value}"
+    verification_url = f"http://localhost:8501/?farmer_id={farmer_id_value}"
 
     qr = qrcode.make(verification_url)
     qr_buffer = BytesIO()
@@ -539,19 +541,24 @@ def generate_farmer_id_card_pdf(selected_row, photo_path, logo_path=None):
   # Footer / Disclaimer Section
     footer_y = 6 * mm
 
+    # Issue date
     c.setFillColorRGB(0.2, 0.2, 0.2)
     c.setFont("Helvetica", 5.5)
     c.drawString(padding, footer_y + 3 * mm, f"Issue Date: {datetime.now().strftime('%Y-%m-%d')}")
 
+    # Disclaimer line 1
     c.setFont("Helvetica-Bold", 5.5)
     c.drawString(padding, footer_y, "Valid for AGROW program identification only")
 
+    # Disclaimer line 2
     c.setFont("Helvetica", 5)
     c.drawString(padding, footer_y - 2.5 * mm, "Not a National ID. Subject to verification.")
 
+    # Issuer (move slightly UP for separation)
     c.setFont("Helvetica-Oblique", 5)
     c.drawRightString(width - padding, footer_y + 2.5 * mm, "Issued by DataDev Limited")
 
+    # Signature line (move DOWN slightly)
     sig_x1 = width - 30 * mm
     sig_x2 = width - 8 * mm
     sig_y = footer_y - 1 * mm
@@ -559,6 +566,7 @@ def generate_farmer_id_card_pdf(selected_row, photo_path, logo_path=None):
     c.setStrokeColorRGB(0.4, 0.4, 0.4)
     c.line(sig_x1, sig_y, sig_x2, sig_y)
 
+    # Signature label centered under the line
     c.setFont("Helvetica", 5)
     c.drawCentredString((sig_x1 + sig_x2) / 2, sig_y - 3 * mm, "Authorized Officer")
 
@@ -710,8 +718,7 @@ def show_auth():
         if st.button("Create Agent Account", use_container_width=True):
             existing = fetch_user(preview_id)
 
-            MINISTRY_INVITE_CODE = os.getenv("MINISTRY_INVITE_CODE", "DATADEV")
-            if invite_code != MINISTRY_INVITE_CODE:
+            if invite_code != "DATADEV":
                 st.error("Invalid ministry invite code.")
             elif existing:
                 st.error("Generated agent ID already exists. Please try again.")
@@ -785,78 +792,75 @@ def show_public_farmer_verification():
     st.markdown("### 🔎 Farmer Self Access Portal")
     st.info("Farmers can search using their Farmer ID or Phone Number.")
 
+    col1, col2 = st.columns(2)
     query_params = st.query_params
     prefilled_farmer_id = query_params.get("farmer_id", "")
-
-    col1, col2 = st.columns(2)
 
     with col1:
         farmer_id_lookup = st.text_input(
             "Enter Farmer ID",
             value=prefilled_farmer_id,
             placeholder="e.g. AG-20260416074143",
-            key="public_farmer_id_lookup",
+            key="public_farmer_id_lookup"
         )
 
     with col2:
         phone_lookup = st.text_input(
             "Enter Phone Number",
             placeholder="e.g. 08123456789",
-            key="public_phone_lookup",
+            key="public_phone_lookup"
         )
 
     auto_search = bool(prefilled_farmer_id)
     search_clicked = st.button(
         "Search Farmer Record",
         key="public_farmer_search",
-        use_container_width=True,
+        use_container_width=True
     )
 
-    if not (search_clicked or auto_search):
-        return
+    if search_clicked or auto_search:
+        df = fetch_farmers()
 
-    df = fetch_farmers()
+        if df.empty:
+            st.warning("No farmer records available yet.")
+            return
 
-    if df.empty:
-        st.warning("No farmer records available yet.")
-        return
+        result_df = df.copy()
 
-    result_df = df.copy()
+        if farmer_id_lookup.strip():
+            result_df = result_df[
+                result_df["farmer_id"].astype(str).str.strip() == farmer_id_lookup.strip()
+            ]
 
-    if farmer_id_lookup.strip():
-        result_df = result_df[
-            result_df["farmer_id"].astype(str).str.strip() == farmer_id_lookup.strip()
-        ]
+        if phone_lookup.strip():
+            result_df = result_df[
+                result_df["phone_number"].astype(str).str.strip() == phone_lookup.strip()
+            ]
 
-    if phone_lookup.strip():
-        result_df = result_df[
-            result_df["phone_number"].astype(str).str.strip() == phone_lookup.strip()
-        ]
+        if not farmer_id_lookup.strip() and not phone_lookup.strip():
+            st.warning("Enter Farmer ID or Phone Number to search.")
+            return
 
-    if not farmer_id_lookup.strip() and not phone_lookup.strip():
-        st.warning("Enter Farmer ID or Phone Number to search.")
-        return
+        if result_df.empty:
+            st.warning("No farmer record found.")
+            return
 
-    if result_df.empty:
-        st.warning("No farmer record found.")
-        return
+        farmer = result_df.iloc[0]
+        photo_path = farmer.get("photo_path", "")
+        logo_path = get_logo_path()
 
-    farmer = result_df.iloc[0]
-    photo_path = farmer.get("photo_path", "")
-    logo_path = get_logo_path()
+        st.success("Farmer record found.")
 
-    st.success("Farmer record found.")
+        col1, col2 = st.columns([1, 2])
 
-    col1, col2 = st.columns([1, 2])
+        with col1:
+            if photo_path and os.path.exists(photo_path):
+                st.image(photo_path, width=220)
+            else:
+                st.warning("No farmer photo available.")
 
-    with col1:
-        if photo_path and os.path.exists(photo_path):
-            st.image(photo_path, width=220)
-        else:
-            st.warning("No farmer photo available.")
-
-    with col2:
-        st.markdown(f"""
+        with col2:
+            st.markdown(f"""
 ### Farmer ID Preview
 
 **Farmer ID:** {farmer.get('farmer_id', '-')}  
@@ -869,21 +873,21 @@ def show_public_farmer_verification():
 **NIN Status:** {farmer.get('nin_status', '-')}  
 **Registration Date:** {farmer.get('registration_date', '-')}  
 **Photo Status:** {farmer.get('photo_status', '-')}  
-        """)
+            """)
 
-        pdf_file = generate_farmer_id_card_pdf(
-            selected_row=farmer,
-            photo_path=photo_path,
-            logo_path=logo_path,
-        )
+            pdf_file = generate_farmer_id_card_pdf(
+                selected_row=farmer,
+                photo_path=photo_path,
+                logo_path=logo_path,
+            )
 
-        st.download_button(
-            label="⬇️ Download Farmer ID Card (PDF)",
-            data=pdf_file.getvalue(),
-            file_name=f"{farmer.get('farmer_id', 'farmer')}_ID_Card.pdf",
-            mime="application/pdf",
-            use_container_width=True,
-        )
+            st.download_button(
+                label="⬇️ Download Farmer ID Card (PDF)",
+                data=pdf_file.getvalue(),
+                file_name=f"{farmer.get('farmer_id', 'farmer')}_ID_Card.pdf",
+                mime="application/pdf",
+                use_container_width=True,
+            )
 
 
 # =========================================================

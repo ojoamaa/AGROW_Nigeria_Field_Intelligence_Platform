@@ -1,20 +1,15 @@
 ﻿import os
 from io import BytesIO
 from datetime import datetime
+from services.log_service import log_action
+from services.id_service import generate_agent_id_db
 
 import pandas as pd
 import plotly.express as px
-import qrcode
 import streamlit as st
-from dotenv import load_dotenv
-from reportlab.lib.units import mm
-from reportlab.pdfgen import canvas
-from reportlab.lib.utils import ImageReader
-
 from nigeria_lga_data import NIGERIA_LGA_MAP
 from core.db import get_connection, init_db
-from services.log_service import log_action
-from services.id_service import generate_agent_id_db
+
 from services.farmer_service import (
     fetch_farmers,
     farmer_exists_today,
@@ -23,6 +18,7 @@ from services.farmer_service import (
     fetch_offline_queue,
     sync_offline_queue,
 )
+
 from services.user_service import (
     fetch_user,
     insert_user,
@@ -30,8 +26,6 @@ from services.user_service import (
     fetch_all_agents,
 )
 
-load_dotenv()
-APP_BASE_URL = os.getenv("APP_BASE_URL", "http://localhost:8501")
 init_db()
 # seed_default_users()
 
@@ -429,142 +423,6 @@ def is_db_available() -> bool:
     except Exception:
         return False
     
-def generate_farmer_id_card_pdf(selected_row, photo_path, logo_path=None):
-    buffer = BytesIO()
-
-    # Standard CR80 ID card size
-    card_width = 85.6 * mm
-    card_height = 54 * mm
-
-    c = canvas.Canvas(buffer, pagesize=(card_width, card_height))
-    width, height = card_width, card_height
-
-    padding = 4 * mm
-
-    # Outer border
-    c.setStrokeColorRGB(0.12, 0.35, 0.18)
-    c.setLineWidth(1)
-    c.roundRect(1.5, 1.5, width - 3, height - 3, 3, stroke=1, fill=0)
-
-    # Header bar
-    header_h = 10 * mm
-    c.setFillColorRGB(0.0, 0.29, 0.53)
-    c.roundRect(1.5, height - header_h - 1.5, width - 3, header_h, 3, stroke=0, fill=1)
-
-    # Logo
-    if logo_path and os.path.exists(logo_path):
-        try:
-            c.drawImage(
-                logo_path,
-                padding,
-                height - 8.8 * mm,
-                width=7 * mm,
-                height=7 * mm,
-                preserveAspectRatio=True,
-                mask='auto'
-            )
-        except Exception:
-            pass
-
-    # Header title
-    c.setFillColorRGB(1, 1, 1)
-    c.setFont("Helvetica-Bold", 9.5)
-    c.drawCentredString(width / 2, height - 6.8 * mm, "AGROW FARMER ID CARD")
-
-    # Photo box
-    photo_x = padding
-    photo_y = 14 * mm
-    photo_w = 23 * mm
-    photo_h = 18 * mm
-
-    c.setStrokeColorRGB(0.7, 0.7, 0.7)
-    c.rect(photo_x, photo_y, photo_w, photo_h, stroke=1, fill=0)
-
-    if photo_path and os.path.exists(photo_path):
-        try:
-            c.drawImage(
-                photo_path,
-                photo_x + 1,
-                photo_y + 1,
-                width=photo_w - 2,
-                height=photo_h - 2,
-                preserveAspectRatio=True,
-                mask='auto'
-            )
-        except Exception:
-            c.setFont("Helvetica", 6)
-            c.drawString(photo_x + 3, photo_y + photo_h / 2, "No Photo")
-    else:
-        c.setFont("Helvetica", 6)
-        c.drawString(photo_x + 3, photo_y + photo_h / 2, "No Photo")
-
-    # Farmer text details
-    text_x = photo_x + photo_w + 4 * mm
-    text_y = height - 15 * mm
-
-    c.setFillColorRGB(0, 0, 0)
-    c.setFont("Helvetica-Bold", 6.7)
-
-    line_gap = 4.2 * mm
-    c.drawString(text_x, text_y, f"Name: {selected_row.get('farmer_full_name', '-')}")
-    c.drawString(text_x, text_y - line_gap, f"Farmer ID: {selected_row.get('farmer_id', '-')}")
-    c.drawString(text_x, text_y - (2 * line_gap), f"State: {normalize_state_name(selected_row.get('state', '-'))}")
-    c.drawString(text_x, text_y - (3 * line_gap), f"LGA: {selected_row.get('lga', '-')}")
-    c.drawString(text_x, text_y - (4 * line_gap), f"Phone: {selected_row.get('phone_number', '-')}")
-    c.drawString(text_x, text_y - (5 * line_gap), f"Crop: {selected_row.get('primary_crop', '-')}")
-
-    # QR content
-    farmer_id_value = selected_row.get("farmer_id", "")
-    APP_BASE_URL = os.getenv("APP_BASE_URL", "http://localhost:8501")
-    verification_url = f"{APP_BASE_URL}/?farmer_id={farmer_id_value}"
-
-    qr = qrcode.make(verification_url)
-    qr_buffer = BytesIO()
-    qr.save(qr_buffer, format="PNG")
-    qr_buffer.seek(0)
-
-    qr_size = 16 * mm
-    qr_x = width - qr_size - padding
-    qr_y = 14 * mm
-
-    c.drawImage(
-        ImageReader(qr_buffer),
-        qr_x,
-        qr_y,
-        width=qr_size,
-        height=qr_size,
-        mask='auto'
-    )
-
-  # Footer / Disclaimer Section
-    footer_y = 6 * mm
-
-    c.setFillColorRGB(0.2, 0.2, 0.2)
-    c.setFont("Helvetica", 5.5)
-    c.drawString(padding, footer_y + 3 * mm, f"Issue Date: {datetime.now().strftime('%Y-%m-%d')}")
-
-    c.setFont("Helvetica-Bold", 5.5)
-    c.drawString(padding, footer_y, "Valid for AGROW program identification only")
-
-    c.setFont("Helvetica", 5)
-    c.drawString(padding, footer_y - 2.5 * mm, "Not a National ID. Subject to verification.")
-
-    c.setFont("Helvetica-Oblique", 5)
-    c.drawRightString(width - padding, footer_y + 2.5 * mm, "Issued by DataDev Limited")
-
-    sig_x1 = width - 30 * mm
-    sig_x2 = width - 8 * mm
-    sig_y = footer_y - 1 * mm
-
-    c.setStrokeColorRGB(0.4, 0.4, 0.4)
-    c.line(sig_x1, sig_y, sig_x2, sig_y)
-
-    c.setFont("Helvetica", 5)
-    c.drawCentredString((sig_x1 + sig_x2) / 2, sig_y - 3 * mm, "Authorized Officer")
-
-    c.save()
-    buffer.seek(0)
-    return buffer
 
 # =========================================================
 # 7. SESSION STATE INIT
@@ -710,8 +568,7 @@ def show_auth():
         if st.button("Create Agent Account", use_container_width=True):
             existing = fetch_user(preview_id)
 
-            MINISTRY_INVITE_CODE = os.getenv("MINISTRY_INVITE_CODE", "DATADEV")
-            if invite_code != MINISTRY_INVITE_CODE:
+            if invite_code != "DATADEV":
                 st.error("Invalid ministry invite code.")
             elif existing:
                 st.error("Generated agent ID already exists. Please try again.")
@@ -785,107 +642,66 @@ def show_public_farmer_verification():
     st.markdown("### 🔎 Farmer Self Access Portal")
     st.info("Farmers can search using their Farmer ID or Phone Number.")
 
-    query_params = st.query_params
-    prefilled_farmer_id = query_params.get("farmer_id", "")
-
     col1, col2 = st.columns(2)
 
     with col1:
         farmer_id_lookup = st.text_input(
             "Enter Farmer ID",
-            value=prefilled_farmer_id,
             placeholder="e.g. AG-20260416074143",
-            key="public_farmer_id_lookup",
+            key="public_farmer_id_lookup"
         )
 
     with col2:
         phone_lookup = st.text_input(
             "Enter Phone Number",
             placeholder="e.g. 08123456789",
-            key="public_phone_lookup",
+            key="public_phone_lookup"
         )
 
-    auto_search = bool(prefilled_farmer_id)
-    search_clicked = st.button(
-        "Search Farmer Record",
-        key="public_farmer_search",
-        use_container_width=True,
-    )
+    if st.button("Search Farmer Record", key="public_farmer_search", use_container_width=True):
+        df = fetch_farmers()
 
-    if not (search_clicked or auto_search):
-        return
+        if df.empty:
+            st.warning("No farmer records available yet.")
+            return
 
-    df = fetch_farmers()
+        result_df = df.copy()
 
-    if df.empty:
-        st.warning("No farmer records available yet.")
-        return
+        if farmer_id_lookup.strip():
+            result_df = result_df[
+                result_df["farmer_id"].astype(str).str.strip() == farmer_id_lookup.strip()
+            ]
 
-    result_df = df.copy()
+        if phone_lookup.strip():
+            result_df = result_df[
+                result_df["phone_number"].astype(str).str.strip() == phone_lookup.strip()
+            ]
 
-    if farmer_id_lookup.strip():
-        result_df = result_df[
-            result_df["farmer_id"].astype(str).str.strip() == farmer_id_lookup.strip()
-        ]
+        if not farmer_id_lookup.strip() and not phone_lookup.strip():
+            st.warning("Enter Farmer ID or Phone Number to search.")
+            return
 
-    if phone_lookup.strip():
-        result_df = result_df[
-            result_df["phone_number"].astype(str).str.strip() == phone_lookup.strip()
-        ]
-
-    if not farmer_id_lookup.strip() and not phone_lookup.strip():
-        st.warning("Enter Farmer ID or Phone Number to search.")
-        return
-
-    if result_df.empty:
-        st.warning("No farmer record found.")
-        return
-
-    farmer = result_df.iloc[0]
-    photo_path = farmer.get("photo_path", "")
-    logo_path = get_logo_path()
-
-    st.success("Farmer record found.")
-
-    col1, col2 = st.columns([1, 2])
-
-    with col1:
-        if photo_path and os.path.exists(photo_path):
-            st.image(photo_path, width=220)
+        if result_df.empty:
+            st.warning("No farmer record found.")
         else:
-            st.warning("No farmer photo available.")
+            farmer = result_df.iloc[0]
 
-    with col2:
-        st.markdown(f"""
-### Farmer ID Preview
+            st.success("Farmer record found.")
+            r1, r2 = st.columns(2)
 
-**Farmer ID:** {farmer.get('farmer_id', '-')}  
-**Full Name:** {farmer.get('farmer_full_name', '-')}  
-**Phone Number:** {farmer.get('phone_number', '-')}  
-**Gender:** {farmer.get('gender', '-')}  
-**Primary Crop:** {farmer.get('primary_crop', '-')}  
-**State:** {normalize_state_name(farmer.get('state', '-'))}  
-**LGA:** {farmer.get('lga', '-')}  
-**NIN Status:** {farmer.get('nin_status', '-')}  
-**Registration Date:** {farmer.get('registration_date', '-')}  
-**Photo Status:** {farmer.get('photo_status', '-')}  
-        """)
+            with r1:
+                st.write(f"**Farmer ID:** {farmer['farmer_id']}")
+                st.write(f"**Full Name:** {farmer['farmer_full_name']}")
+                st.write(f"**Phone Number:** {farmer['phone_number']}")
+                st.write(f"**Gender:** {farmer['gender']}")
+                st.write(f"**Primary Crop:** {farmer['primary_crop']}")
 
-        pdf_file = generate_farmer_id_card_pdf(
-            selected_row=farmer,
-            photo_path=photo_path,
-            logo_path=logo_path,
-        )
-
-        st.download_button(
-            label="⬇️ Download Farmer ID Card (PDF)",
-            data=pdf_file.getvalue(),
-            file_name=f"{farmer.get('farmer_id', 'farmer')}_ID_Card.pdf",
-            mime="application/pdf",
-            use_container_width=True,
-        )
-
-
+            with r2:
+                st.write(f"**State:** {normalize_state_name(farmer['state'])}")
+                st.write(f"**LGA:** {farmer['lga']}")
+                st.write(f"**NIN Status:** {farmer['nin_status']}")
+                st.write(f"**Registration Date:** {farmer['registration_date']}")
+                st.write(f"**Photo Status:** {farmer['photo_status']}")
 # =========================================================
 # 9. APP BODY
 # =========================================================
@@ -987,14 +803,14 @@ else:
 
     st.markdown(
         """
-        <div style="text-align:center; margin-bottom:18px; padding: 0 10px;">
-            <div style="font-size:clamp(22px, 4vw, 32px); font-weight:900; color:#004B87; line-height:1.2;">
+        <div style="text-align:center; margin-bottom: 18px;">
+            <div style="font-size:32px; font-weight:900; color:#004B87;">
                 AGROW Nigeria Digital Field Intelligence Platform
             </div>
-            <div style="font-size:clamp(13px, 2.2vw, 16px); font-weight:700; color:#1B5E20; margin-top:6px; line-height:1.4;">
+            <div style="font-size:16px; font-weight:700; color:#1B5E20;">
                 Ministry Deployment Prototype for National Farmer Registration and Input Monitoring
             </div>
-            <div style="font-size:clamp(11px, 1.8vw, 14px); color:#555; margin-top:6px; line-height:1.5;">
+            <div style="font-size:14px; color:#555;">
                 Supporting beneficiary verification, field intelligence capture, geospatial tracking and agent coordination
             </div>
         </div>
@@ -1005,8 +821,15 @@ else:
     # -------------------------
     # Online / Offline indicator
     # -------------------------
-    online_status = is_db_available()
+    def is_online():
+        try:
+            conn = get_connection()
+            conn.close()
+            return True
+        except Exception:
+            return False
 
+    online_status = is_online()
     if online_status:
         st.success("🟢 Online Mode: records will save directly to the main database.")
     else:
@@ -1058,40 +881,38 @@ else:
             captured_photos = len(df[df["photo_status"] == "Captured"])
 
         st.markdown("### National Performance Overview")
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Beneficiaries", total_beneficiaries)
+        m2.metric("Verified NIN", total_verified)
+        m3.metric("Land Coverage (Ha)", f"{total_land:.1f}")
+        m4.metric("Verification Rate", f"{verification_rate}%")
 
-        row1 = st.columns(4)
-        row1[0].metric("Beneficiaries", total_beneficiaries)
-        row1[1].metric("Verified NIN", total_verified)
-        row1[2].metric("Land Coverage (Ha)", f"{total_land:.1f}")
-        row1[3].metric("Verification Rate", f"{verification_rate}%")
-
-        row2 = st.columns(4)
-        row2[0].metric("Registrations Today", registrations_today)
-        row2[1].metric("Pending NIN", pending_nin)
-        row2[2].metric("Rejected NIN", rejected_nin)
-        row2[3].metric("Captured Photos", captured_photos)
+        m5, m6, m7, m8 = st.columns(4)
+        m5.metric("Registrations Today", registrations_today)
+        m6.metric("Pending NIN", pending_nin)
+        m7.metric("Rejected NIN", rejected_nin)
+        m8.metric("Captured Photos", captured_photos)
 
         if role == "admin":
             st.markdown("### Admin Monitoring Snapshot")
-            a1, a2 = st.columns(2)
-            a3, a4 = st.columns(2)
-
+            a1, a2, a3, a4 = st.columns(4)
             a1.info(f"Registered Agents: {total_agents}")
             a2.info("Target Beneficiaries: 1,000,000")
             a3.info("Target States Covered: 36 + FCT")
             a4.info("Target Verification Rate: 95%")
         else:
             st.markdown("### Field Agent Monitoring Snapshot")
-            st.info(f"Coverage State: {normalize_state_name(user_meta.get('state', '-'))}")
-            st.info(f"Coverage LGA: {user_meta.get('lga_coverage', '-')}")
-            st.info("Target Agent Uptime: 99%")
+            a1, a2, a3 = st.columns(3)
+            a1.info(f"Coverage State: {normalize_state_name(user_meta.get('state', '-'))}")
+            a2.info(f"Coverage LGA: {user_meta.get('lga_coverage', '-')}")
+            a3.info("Target Agent Uptime: 99%")
 
         st.divider()
 
         st.subheader("Geospatial Mapping")
         if not df.empty:
             map_df = df.rename(columns={"latitude": "lat", "longitude": "lon"})
-            st.map(map_df)
+            st.map(map_df, latitude="lat", longitude="lon")
         else:
             st.info("No field data available for mapping.")
 
@@ -1105,18 +926,20 @@ else:
                 state_counts = df["state"].value_counts().reset_index()
                 state_counts.columns = ["State", "Count"]
                 state_counts["State"] = state_counts["State"].apply(normalize_state_name)
-                st.plotly_chart(px.bar(state_counts, x="State", y="Count"), use_container_width=True)
+                fig_state = px.bar(state_counts, x="State", y="Count")
+                st.plotly_chart(fig_state, use_container_width=True)
             else:
-                st.info("No state data")
+                st.info("No state registration data available.")
 
         with c2:
             st.subheader("Registrations by Agent")
             if not df.empty:
                 agent_counts = df["agent_id"].value_counts().reset_index()
                 agent_counts.columns = ["Agent_ID", "Count"]
-                st.plotly_chart(px.bar(agent_counts, x="Agent_ID", y="Count"), use_container_width=True)
+                fig_agent = px.bar(agent_counts, x="Agent_ID", y="Count")
+                st.plotly_chart(fig_agent, use_container_width=True)
             else:
-                st.info("No agent data")
+                st.info("No agent registration data available.")
 
         st.divider()
 
@@ -1127,24 +950,30 @@ else:
             if not df.empty:
                 nin_counts = df["nin_status"].value_counts().reset_index()
                 nin_counts.columns = ["NIN_Status", "Count"]
-                st.plotly_chart(
-                    px.pie(nin_counts, names="NIN_Status", values="Count", hole=0.45),
-                    use_container_width=True,
+                fig_nin = px.pie(
+                    nin_counts,
+                    names="NIN_Status",
+                    values="Count",
+                    hole=0.45,
                 )
+                st.plotly_chart(fig_nin, use_container_width=True)
             else:
-                st.info("No NIN data")
+                st.info("No NIN verification data available.")
 
         with d2:
             st.subheader("Photo Capture Status")
             if not df.empty:
                 photo_counts = df["photo_status"].value_counts().reset_index()
                 photo_counts.columns = ["Photo_Status", "Count"]
-                st.plotly_chart(
-                    px.pie(photo_counts, names="Photo_Status", values="Count", hole=0.45),
-                    use_container_width=True,
+                fig_photo = px.pie(
+                    photo_counts,
+                    names="Photo_Status",
+                    values="Count",
+                    hole=0.45,
                 )
+                st.plotly_chart(fig_photo, use_container_width=True)
             else:
-                st.info("No photo data")
+                st.info("No photo capture data available.")
 
         st.divider()
 
@@ -1153,44 +982,96 @@ else:
             input_counts = df["input_distributed"].fillna("").str.split(", ").explode()
             input_counts = input_counts[input_counts != ""].value_counts().reset_index()
             input_counts.columns = ["Input_Type", "Count"]
-            st.plotly_chart(px.bar(input_counts, x="Input_Type", y="Count"), use_container_width=True)
+            fig_inputs = px.bar(input_counts, x="Input_Type", y="Count")
+            st.plotly_chart(fig_inputs, use_container_width=True)
         else:
-            st.info("No input data")
+            st.info("No input distribution data available.")
 
         st.divider()
 
         st.subheader("Recent Farmer Registrations")
         if not df.empty:
             recent_df = df.sort_values(by="registration_date", ascending=False).head(10)
+
+            recent_df = recent_df.rename(columns={
+                "farmer_id": "Farmer_ID",
+                "registration_date": "Registration_Date",
+                "agent_id": "Agent_ID",
+                "farmer_full_name": "Farmer_Full_Name",
+                "state": "State",
+                "lga": "LGA",
+                "phone_number": "Phone_Number",
+                "primary_crop": "Primary_Crop",
+                "nin_status": "NIN_Status",
+                "photo_status": "Photo_Status",
+            })
+
+            recent_df = recent_df[
+                [
+                    "Farmer_ID",
+                    "Registration_Date",
+                    "Agent_ID",
+                    "Farmer_Full_Name",
+                    "State",
+                    "LGA",
+                    "Phone_Number",
+                    "Primary_Crop",
+                    "NIN_Status",
+                    "Photo_Status",
+                ]
+            ]
+
+            recent_df["State"] = recent_df["State"].apply(normalize_state_name)
             st.dataframe(recent_df, use_container_width=True)
         else:
-            st.info("No farmer records yet")
+            st.info("No farmer records available yet.")
 
-        st.divider()
+        st.markdown("### Executive Summary")
+        if total_beneficiaries == 0:
+            st.info(
+                "No farmer registrations have been captured yet. Once field records start coming in, "
+                "this dashboard will show beneficiary counts, verification progress, location coverage, "
+                "agent performance, input distribution, and photo capture compliance."
+            )
+        else:
+            st.success(
+                f"This deployment snapshot shows {total_beneficiaries} registered beneficiaries, "
+                f"{total_verified} verified NIN records, {registrations_today} registrations captured today, "
+                f"and {total_land:.1f} hectares of monitored farmland under coverage."
+            )
 
         st.markdown("### Offline Queue Monitor")
+
         queue_df = fetch_offline_queue()
 
-        pending_count = len(queue_df[queue_df["sync_status"] == "PENDING"]) if not queue_df.empty else 0
-        failed_count = len(queue_df[queue_df["sync_status"] == "FAILED"]) if not queue_df.empty else 0
-        synced_count = len(queue_df[queue_df["sync_status"] == "SYNCED"]) if not queue_df.empty else 0
+        if not queue_df.empty:
+            pending_count = len(queue_df[queue_df["sync_status"] == "PENDING"])
+            failed_count = len(queue_df[queue_df["sync_status"] == "FAILED"])
+            synced_count = len(queue_df[queue_df["sync_status"] == "SYNCED"])
+        else:
+            pending_count = 0
+            failed_count = 0
+            synced_count = 0
 
         q1, q2, q3 = st.columns(3)
-        q1.metric("Pending", pending_count)
-        q2.metric("Synced", synced_count)
-        q3.metric("Failed", failed_count)
+        with q1:
+            st.metric("Pending Queue", pending_count)
+        with q2:
+            st.metric("Synced Queue Items", synced_count)
+        with q3:
+            st.metric("Failed Queue Items", failed_count)
 
-        if st.button("Sync Pending Records", use_container_width=True):
+        if st.button("Sync Pending Records", key="sync_pending_records", use_container_width=True):
             synced, failed = sync_offline_queue()
-            st.success(f"{synced} synced")
-            if failed:
-                st.warning(f"{failed} failed")
+            st.success(f"{synced} queued record(s) synced successfully.")
+            if failed > 0:
+                st.warning(f"{failed} queued record(s) failed during sync.")
             st.rerun()
 
         if not queue_df.empty:
             st.dataframe(queue_df, use_container_width=True)
         else:
-            st.info("No queue records")
+            st.info("No offline queue records yet.")
 
     # =========================================================
     # TAB 2: REGISTER FARMER
@@ -1223,17 +1104,27 @@ else:
         ]
 
         st.markdown("### Section 4: Support Delivered")
-        input_list = st.multiselect("Inputs Distributed", input_options, key=f"input_list_{form_v}")
+        input_list = st.multiselect(
+            "Inputs Distributed",
+            input_options,
+            key=f"input_list_{form_v}",
+        )
         quantity_units = len(input_list)
         st.markdown(f"### Total Input Units Selected: {quantity_units}")
 
         st.markdown("---")
         st.markdown("### Section 7: Farmer Photo Capture")
-        enable_camera_main = st.checkbox("Enable Camera", key=f"enable_camera_main_{form_v}")
+        enable_camera_main = st.checkbox(
+            "Enable Camera",
+            key=f"enable_camera_main_{form_v}",
+        )
 
         photo_capture = None
         if enable_camera_main:
-            photo_capture = st.camera_input("Capture Farmer Photo", key=f"photo_capture_{form_v}")
+            photo_capture = st.camera_input(
+                "Capture Farmer Photo",
+                key=f"photo_capture_{form_v}",
+            )
 
         st.markdown("---")
 
@@ -1261,7 +1152,11 @@ else:
                 farmer_state = user_meta.get("state", "")
 
             lga_list = NIGERIA_LGA_MAP.get(farmer_state, [])
-            farmer_lga = st.selectbox("LGA", lga_list if lga_list else ["N/A"], key=f"farmer_lga_{form_v}")
+            farmer_lga = st.selectbox(
+                "LGA",
+                lga_list if lga_list else ["N/A"],
+                key=f"farmer_lga_{form_v}"
+            )
             ward = st.text_input("Ward", key=f"ward_{form_v}")
             community = st.text_input("Community / Village", key=f"community_{form_v}")
             residential_address = st.text_area("Residential Address", key=f"residential_address_{form_v}")
@@ -1281,7 +1176,12 @@ else:
                 key=f"secondary_crop_{form_v}",
             )
 
-            farm_size = st.number_input("Farm Size (Hectares)", min_value=0.0, step=0.1, key=f"farm_size_{form_v}")
+            farm_size = st.number_input(
+                "Farm Size (Hectares)",
+                min_value=0.0,
+                step=0.1,
+                key=f"farm_size_{form_v}"
+            )
 
             st.markdown("---")
             st.markdown("### Section 5: Verification")
@@ -1303,8 +1203,16 @@ else:
             st.markdown("---")
             st.markdown("### Section 6: Geo-tagging and Notes")
 
-            latitude = st.number_input("Latitude", format="%.6f", key=f"latitude_{form_v}")
-            longitude = st.number_input("Longitude", format="%.6f", key=f"longitude_{form_v}")
+            latitude = st.number_input(
+                "Latitude",
+                format="%.6f",
+                key=f"latitude_{form_v}"
+            )
+            longitude = st.number_input(
+                "Longitude",
+                format="%.6f",
+                key=f"longitude_{form_v}"
+            )
             remarks = st.text_area("Enumerator Remarks", key=f"remarks_{form_v}")
 
             st.markdown("---")
@@ -1335,6 +1243,10 @@ else:
                 now = datetime.now()
                 farmer_id = f"AG-{now.strftime('%Y%m%d%H%M%S')}"
 
+                farm_size_val = farm_size
+                latitude_val = latitude
+                longitude_val = longitude
+
                 photo_path = ""
                 if photo_capture is not None:
                     photo_filename = f"{farmer_id}.jpg"
@@ -1362,20 +1274,20 @@ else:
                     "Residential_Address": residential_address,
                     "Primary_Crop": primary_crop,
                     "Secondary_Crop": secondary_crop,
-                    "Farm_Size_Ha": farm_size,
+                    "Farm_Size_Ha": farm_size_val,
                     "Input_Distributed": ", ".join(input_list),
                     "Quantity_Units": quantity_units,
                     "NIN_Status": nin_status,
                     "ID_Type": id_type,
                     "ID_Number": id_number,
-                    "Latitude": latitude,
-                    "Longitude": longitude,
+                    "Latitude": latitude_val,
+                    "Longitude": longitude_val,
                     "Enumerator_Remarks": remarks,
                     "Photo_Path": photo_path,
                     "Photo_Status": "Captured" if photo_path else "No Photo",
                 }
 
-                if is_db_available():
+                if is_online():
                     insert_farmer(row)
                     log_action(user_id, "FARMER_REGISTERED", farmer_id)
                     st.session_state["registration_success"] = "✅ Farmer record saved directly to the main database."
@@ -1430,7 +1342,11 @@ else:
             search_name = st.text_input("Search Farmer Name", key="search_name")
 
         with search_col2:
-            search_agent = st.text_input("Search Agent ID", key="search_agent", placeholder="e.g. FCT-01")
+            search_agent = st.text_input(
+                "Search Agent ID",
+                key="search_agent",
+                placeholder="e.g. FCT-01"
+            )
 
         with search_col3:
             filter_nin_status = st.selectbox(
@@ -1458,6 +1374,7 @@ else:
                 lga_filter_options += sorted(df[df["state"] == filter_state]["lga"].dropna().unique().tolist())
             elif not df.empty:
                 lga_filter_options += sorted(df["lga"].dropna().unique().tolist())
+
             filter_lga = st.selectbox("Filter LGA", lga_filter_options, key="filter_lga")
 
         with filter_col3:
@@ -1529,27 +1446,58 @@ else:
         })
 
         preferred_columns = [
-            "Farmer_ID", "Registration_Date", "Agent_ID", "Farmer_Full_Name", "Gender",
-            "Date_of_Birth", "Phone_Number", "Alternate_Phone", "Email_Address", "NIN",
-            "State", "LGA", "Ward", "Community_Village", "Residential_Address",
-            "Primary_Crop", "Secondary_Crop", "Farm_Size_Ha", "Input_Distributed",
-            "Quantity_Units", "NIN_Status", "ID_Type", "ID_Number", "Latitude",
-            "Longitude", "Enumerator_Remarks", "Photo_Status", "Photo_Path",
+            "Farmer_ID",
+            "Registration_Date",
+            "Agent_ID",
+            "Farmer_Full_Name",
+            "Gender",
+            "Date_of_Birth",
+            "Phone_Number",
+            "Alternate_Phone",
+            "Email_Address",
+            "NIN",
+            "State",
+            "LGA",
+            "Ward",
+            "Community_Village",
+            "Residential_Address",
+            "Primary_Crop",
+            "Secondary_Crop",
+            "Farm_Size_Ha",
+            "Input_Distributed",
+            "Quantity_Units",
+            "NIN_Status",
+            "ID_Type",
+            "ID_Number",
+            "Latitude",
+            "Longitude",
+            "Enumerator_Remarks",
+            "Photo_Status",
+            "Photo_Path",
         ]
 
         available_columns = [col for col in preferred_columns if col in display_df.columns]
         display_df = display_df[available_columns]
 
         screen_columns = [
-            "Farmer_ID", "Registration_Date", "Agent_ID", "Farmer_Full_Name", "Gender",
-            "Phone_Number", "State", "LGA", "Primary_Crop", "Quantity_Units",
-            "NIN_Status", "Photo_Status",
+            "Farmer_ID",
+            "Registration_Date",
+            "Agent_ID",
+            "Farmer_Full_Name",
+            "Gender",
+            "Phone_Number",
+            "State",
+            "LGA",
+            "Primary_Crop",
+            "Quantity_Units",
+            "NIN_Status",
+            "Photo_Status",
         ]
 
         available_screen_columns = [col for col in screen_columns if col in display_df.columns]
         st.dataframe(display_df[available_screen_columns], use_container_width=True)
 
-        st.markdown("### Farmer ID Preview")
+        st.markdown("### Farmer Photo Preview")
 
         if "photo_path" in filtered_df.columns:
             photo_records = filtered_df[
@@ -1575,34 +1523,36 @@ else:
             selected_row = photo_records.iloc[selected_index]
             selected_photo_path = selected_row["photo_path"]
 
-            if selected_photo_path and os.path.exists(selected_photo_path):
-                col1, col2 = st.columns([1, 2])
+            col1, col2 = st.columns([1, 1.3])
 
-                with col1:
-                    st.image(selected_photo_path, width=220)
+            with col1:
+                if selected_photo_path and os.path.exists(selected_photo_path):
+                    st.image(
+                        selected_photo_path,
+                        caption=f"{selected_row['farmer_full_name']} ({selected_row['farmer_id']})",
+                        width=300
+                    )
+                else:
+                    st.warning("Photo file path exists in record, but image file was not found on disk.")
 
-                with col2:
-                    st.markdown(f"""
-**Farmer ID:** {selected_row['farmer_id']}  
-**Name:** {selected_row['farmer_full_name']}  
-**Phone:** {selected_row['phone_number']}  
-**State:** {normalize_state_name(selected_row['state'])}  
-**LGA:** {selected_row['lga']}  
-**Crop:** {selected_row.get('primary_crop', '-')}  
-**Photo Status:** {selected_row['photo_status']}
-                    """)
-            else:
-                st.warning("Photo file path exists in record, but image file was not found on disk.")
+            with col2:
+                st.write(f"**Farmer ID:** {selected_row['farmer_id']}")
+                st.write(f"**Farmer Name:** {selected_row['farmer_full_name']}")
+                st.write(f"**Phone Number:** {selected_row['phone_number']}")
+                st.write(f"**State:** {normalize_state_name(selected_row['state'])}")
+                st.write(f"**LGA:** {selected_row['lga']}")
+                st.write(f"**Photo Status:** {selected_row['photo_status']}")
+                st.code(selected_photo_path)
         else:
             st.info("No captured farmer photos available for preview yet.")
 
-        download_col1, download_col2 = st.columns(2)
+        col1, col2 = st.columns(2)
 
-        with download_col1:
+        with col1:
             table_to_csv_download(display_df, "agrow_master_registry.csv")
 
-        with download_col2:
-            table_to_excel_download(display_df, "agrow_master_registry.xlsx")       
+        with col2:
+            table_to_excel_download(display_df, "agrow_master_registry.xlsx")
 
     # =========================================================
     # TAB 4: ANALYTICS
@@ -1650,3 +1600,4 @@ else:
         '<div class="footer">© DataDev Limited | AGROW Field Intelligence Suite v4.0 | Ministry Deployment Prototype</div>',
         unsafe_allow_html=True,
     )
+

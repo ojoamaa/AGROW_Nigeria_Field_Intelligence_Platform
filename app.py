@@ -81,20 +81,22 @@ st.markdown(
     }}
 
     [data-testid="stSidebar"] {{
-    background-color: #FFFFFF;
-    border-right: 3px solid {PRIMARY_GREEN};
-    overflow-y: auto !important;
-}}
-
-section[data-testid="stSidebar"] {{
-    width: 320px !important;
-}}
-
-@media (max-width: 768px) {{
-    section[data-testid="stSidebar"] {{
-        width: 85vw !important;
+        background-color: #FFFFFF;
+        border-right: 3px solid {PRIMARY_GREEN};
+        overflow-y: auto !important;
     }}
-}}
+
+    section[data-testid="stSidebar"] {{
+        width: 320px !important;
+    }}
+
+    @media (max-width: 768px) {{
+        section[data-testid="stSidebar"] {{
+            width: 78vw !important;
+            min-width: 78vw !important;
+            max-width: 78vw !important;
+        }}
+    }}
 
     [data-testid="stSidebar"]::-webkit-scrollbar {{
         width: 10px;
@@ -256,18 +258,45 @@ section[data-testid="stSidebar"] {{
 
     @media (max-width: 768px) {{
         .main-title {{
-            font-size: 18px !important;
-            line-height: 1.2 !important;
+            font-size: 16px !important;
+            line-height: 1.25 !important;
         }}
 
         .sub-title {{
-            font-size: 11px !important;
-            line-height: 1.35 !important;
+            font-size: 10px !important;
+            line-height: 1.3 !important;
         }}
 
         .small-note {{
-            font-size: 10px !important;
-            line-height: 1.35 !important;
+            font-size: 9px !important;
+            line-height: 1.3 !important;
+        }}
+
+        [data-testid="stMetric"] {{
+            padding: 10px !important;
+            border-radius: 10px !important;
+        }}
+
+        [data-testid="stMetricValue"] {{
+            font-size: 20px !important;
+        }}
+
+        .footer {{
+            display: none !important;
+        }}
+
+        .stButton > button,
+        .stDownloadButton > button {{
+            width: 100% !important;
+            min-height: 44px !important;
+            font-size: 14px !important;
+        }}
+
+        .stTextInput input,
+        .stNumberInput input,
+        .stDateInput input,
+        .stTextArea textarea {{
+            font-size: 14px !important;
         }}
 
         .auth-card {{
@@ -277,17 +306,10 @@ section[data-testid="stSidebar"] {{
             margin-top: 6px !important;
         }}
 
-        
         .stTabs [data-baseweb="tab"] {{
             font-size: 13px !important;
             padding-left: 8px !important;
             padding-right: 8px !important;
-        }}
-
-        .stButton > button,
-        .stDownloadButton > button {{
-            min-height: 48px !important;
-            font-size: 15px !important;
         }}
     }}
 
@@ -1034,7 +1056,7 @@ else:
     # TAB LAYOUT
     # =========================================================
     tab_dashboard, tab_farmer_registration, tab_distribution, tab_analytics = st.tabs(
-        ["📊 Dashboard", "📝 Farmer Registration", "📦 Distribution", "📈 Analytics"]
+        ["Dashboard", "Register", "Distribution", "Analytics"]
     )
 
     # =========================================================
@@ -1059,17 +1081,19 @@ else:
 
         st.markdown("### National Performance Overview")
 
-        row1 = st.columns(4)
+        row1 = st.columns(2)
+        row2 = st.columns(2)
+        row3 = st.columns(2)
+        row4 = st.columns(2)
+
         row1[0].metric("Beneficiaries", total_beneficiaries)
         row1[1].metric("Verified NIN", total_verified)
-        row1[2].metric("Land Coverage (Ha)", f"{total_land:.1f}")
-        row1[3].metric("Verification Rate", f"{verification_rate}%")
-
-        row2 = st.columns(4)
-        row2[0].metric("Registrations Today", registrations_today)
-        row2[1].metric("Pending NIN", pending_nin)
-        row2[2].metric("Rejected NIN", rejected_nin)
-        row2[3].metric("Captured Photos", captured_photos)
+        row2[0].metric("Land Coverage (Ha)", f"{total_land:.1f}")
+        row2[1].metric("Verification Rate", f"{verification_rate}%")
+        row3[0].metric("Registrations Today", registrations_today)
+        row3[1].metric("Pending NIN", pending_nin)
+        row4[0].metric("Rejected NIN", rejected_nin)
+        row4[1].metric("Captured Photos", captured_photos)
 
         if role == "admin":
             st.markdown("### Admin Monitoring Snapshot")

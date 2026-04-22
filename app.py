@@ -92,24 +92,39 @@ st.markdown(
 
     @media (max-width: 768px) {{
         section[data-testid="stSidebar"] {{
-            width: 78vw !important;
-            min-width: 78vw !important;
-            max-width: 78vw !important;
+            width: 68vw !important;
+            min-width: 68vw !important;
+            max-width: 68vw !important;
+        }}
+
+        .block-container {{
+            padding-top: 1rem !important;
+            padding-left: 0.8rem !important;
+            padding-right: 0.8rem !important;
+            padding-bottom: 1rem !important;
         }}
 
         .main-title {{
             font-size: 16px !important;
             line-height: 1.25 !important;
+            margin-bottom: 2px !important;
         }}
 
         .sub-title {{
             font-size: 10px !important;
             line-height: 1.3 !important;
+            margin-bottom: 4px !important;
         }}
 
         .small-note {{
             font-size: 9px !important;
             line-height: 1.3 !important;
+            margin-bottom: 8px !important;
+        }}
+
+        .top-title {{
+            font-size: 11px !important;
+            line-height: 1.2 !important;
         }}
 
         [data-testid="stMetric"] {{
@@ -144,12 +159,6 @@ st.markdown(
             padding: 12px !important;
             border-radius: 10px !important;
             margin-top: 6px !important;
-        }}
-
-        .stTabs [data-baseweb="tab"] {{
-            font-size: 13px !important;
-            padding-left: 8px !important;
-            padding-right: 8px !important;
         }}
     }}
 
@@ -1051,16 +1060,18 @@ else:
     verification_rate = round((total_verified / total_beneficiaries) * 100, 1) if total_beneficiaries > 0 else 0.0
 
     # =========================================================
-    # TAB LAYOUT
+    # PAGE LAYOUT
     # =========================================================
-    tab_dashboard, tab_farmer_registration, tab_distribution, tab_analytics = st.tabs(
-        ["Dashboard", "Register", "Distribution", "Analytics"]
+    page_choice = st.selectbox(
+        "Navigate",
+        ["Dashboard", "Register", "Distribution", "Analytics"],
+        key="mobile_nav"
     )
 
     # =========================================================
-    # TAB 1: DASHBOARD
+    # PAGE 1: DASHBOARD
     # =========================================================
-    with tab_dashboard:
+    if page_choice == "Dashboard":
         total_agents = len(fetch_all_agents()) if role == "admin" else 0
 
         registrations_today = 0
@@ -1215,9 +1226,9 @@ else:
             st.info("No queue records")
 
     # =========================================================
-    # TAB 2: REGISTER FARMER
+    # PAGE 2: REGISTER FARMER
     # =========================================================
-    with tab_farmer_registration:
+    elif page_choice == "Register":
         st.info("Complete each section carefully and click 'Sync Secure Record' only after all required information has been entered.")
 
         if "registration_success" in st.session_state:
@@ -1410,9 +1421,9 @@ else:
                 st.rerun()
 
     # =========================================================
-    # TAB 3: DISTRIBUTION
+    # PAGE 3: DISTRIBUTION
     # =========================================================
-    with tab_distribution:
+    elif page_choice == "Distribution":
         st.subheader("Input Breakdown")
 
         if not df.empty:
@@ -1446,21 +1457,19 @@ else:
 
             st.rerun()
 
-        search_col1, search_col2, search_col3, search_col4 = st.columns(4)
-
+        search_col1, search_col2 = st.columns(2)
         with search_col1:
             search_name = st.text_input("Search Farmer Name", key="search_name")
-
         with search_col2:
             search_agent = st.text_input("Search Agent ID", key="search_agent", placeholder="e.g. FCT-01")
 
+        search_col3, search_col4 = st.columns(2)
         with search_col3:
             filter_nin_status = st.selectbox(
                 "Filter NIN Status",
                 ["All", "Verified", "Pending", "Rejected"],
                 key="filter_nin_status"
             )
-
         with search_col4:
             filter_photo_status = st.selectbox(
                 "Filter Photo Status",
@@ -1624,12 +1633,12 @@ else:
             table_to_csv_download(display_df, "agrow_master_registry.csv")
 
         with download_col2:
-            table_to_excel_download(display_df, "agrow_master_registry.xlsx")       
+            table_to_excel_download(display_df, "agrow_master_registry.xlsx")
 
     # =========================================================
-    # TAB 4: ANALYTICS
+    # PAGE 4: ANALYTICS
     # =========================================================
-    with tab_analytics:
+    elif page_choice == "Analytics":
         c1, c2 = st.columns(2)
 
         with c1:

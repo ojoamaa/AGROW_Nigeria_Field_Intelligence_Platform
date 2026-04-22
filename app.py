@@ -96,6 +96,61 @@ st.markdown(
             min-width: 78vw !important;
             max-width: 78vw !important;
         }}
+
+        .main-title {{
+            font-size: 16px !important;
+            line-height: 1.25 !important;
+        }}
+
+        .sub-title {{
+            font-size: 10px !important;
+            line-height: 1.3 !important;
+        }}
+
+        .small-note {{
+            font-size: 9px !important;
+            line-height: 1.3 !important;
+        }}
+
+        [data-testid="stMetric"] {{
+            padding: 10px !important;
+            border-radius: 10px !important;
+        }}
+
+        [data-testid="stMetricValue"] {{
+            font-size: 20px !important;
+        }}
+
+        .footer {{
+            display: none !important;
+        }}
+
+        .stButton > button,
+        .stDownloadButton > button {{
+            width: 100% !important;
+            min-height: 44px !important;
+            font-size: 14px !important;
+        }}
+
+        .stTextInput input,
+        .stNumberInput input,
+        .stDateInput input,
+        .stTextArea textarea {{
+            font-size: 14px !important;
+        }}
+
+        .auth-card {{
+            max-width: 100% !important;
+            padding: 12px !important;
+            border-radius: 10px !important;
+            margin-top: 6px !important;
+        }}
+
+        .stTabs [data-baseweb="tab"] {{
+            font-size: 13px !important;
+            padding-left: 8px !important;
+            padding-right: 8px !important;
+        }}
     }}
 
     [data-testid="stSidebar"]::-webkit-scrollbar {{
@@ -254,63 +309,6 @@ st.markdown(
         transform: rotate(-20deg);
         z-index: 0;
         pointer-events: none;
-    }}
-
-    @media (max-width: 768px) {{
-        .main-title {{
-            font-size: 16px !important;
-            line-height: 1.25 !important;
-        }}
-
-        .sub-title {{
-            font-size: 10px !important;
-            line-height: 1.3 !important;
-        }}
-
-        .small-note {{
-            font-size: 9px !important;
-            line-height: 1.3 !important;
-        }}
-
-        [data-testid="stMetric"] {{
-            padding: 10px !important;
-            border-radius: 10px !important;
-        }}
-
-        [data-testid="stMetricValue"] {{
-            font-size: 20px !important;
-        }}
-
-        .footer {{
-            display: none !important;
-        }}
-
-        .stButton > button,
-        .stDownloadButton > button {{
-            width: 100% !important;
-            min-height: 44px !important;
-            font-size: 14px !important;
-        }}
-
-        .stTextInput input,
-        .stNumberInput input,
-        .stDateInput input,
-        .stTextArea textarea {{
-            font-size: 14px !important;
-        }}
-
-        .auth-card {{
-            max-width: 100% !important;
-            padding: 12px !important;
-            border-radius: 10px !important;
-            margin-top: 6px !important;
-        }}
-
-        .stTabs [data-baseweb="tab"] {{
-            font-size: 13px !important;
-            padding-left: 8px !important;
-            padding-right: 8px !important;
-        }}
     }}
 
     .footer {{

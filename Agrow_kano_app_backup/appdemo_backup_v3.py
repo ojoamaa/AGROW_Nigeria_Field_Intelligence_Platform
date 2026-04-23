@@ -32,164 +32,14 @@ from services.user_service import (
 
 load_dotenv()
 APP_BASE_URL = os.getenv("APP_BASE_URL", "http://localhost:8501")
-
-
-def seed_default_users():
-    admin_user = fetch_user("admin")
-    if not admin_user:
-        insert_user(
-            "admin",
-            "agrow2026",
-            "admin",
-            "System Administrator",
-            "08000000000",
-            "00000000000",
-            "FCT",
-            "Abuja Municipal",
-            "admin@datadev.local"
-        )
-
-
-def seed_demo_agents():
-    if not fetch_user("FCT-01"):
-        insert_user(
-            "FCT-01",
-            "agent2026",
-            "agent",
-            "Demo FCT Agent",
-            "08011111111",
-            "11111111111",
-            "FCT",
-            "Abaji",
-            "fctagent@datadev.local"
-        )
-
-    if not fetch_user("KN-01"):
-        insert_user(
-            "KN-01",
-            "agent2026",
-            "agent",
-            "Demo Kano Agent",
-            "08022222222",
-            "22222222222",
-            "Kano",
-            "Nassarawa",
-            "kanoagent@datadev.local"
-        )
-
-
-def seed_demo_data():
-    df = fetch_farmers()
-
-    if not df.empty:
-        return
-
-    demo_rows = [
-        {
-            "Farmer_ID": "AG-202604220001",
-            "Registration_Date": "2026-04-22 08:15:00",
-            "Agent_ID": "FCT-01",
-            "Farmer_Full_Name": "Musa Ibrahim",
-            "Gender": "Male",
-            "Date_of_Birth": "1988-05-12",
-            "Phone_Number": "08031234567",
-            "Alternate_Phone": "08141234567",
-            "Email_Address": "musa@example.com",
-            "NIN": "12345678901",
-            "State": "FCT",
-            "LGA": "Abaji",
-            "Ward": "Ward 1",
-            "Community_Village": "Yaba",
-            "Residential_Address": "Abaji, FCT",
-            "Primary_Crop": "Rice",
-            "Secondary_Crop": "Maize",
-            "Farm_Size_Ha": 3.5,
-            "Input_Distributed": "Rice Seeds, NPK, Urea",
-            "Quantity_Units": 3,
-            "NIN_Status": "Verified",
-            "ID_Type": "NIN Slip",
-            "ID_Number": "NIN-001",
-            "Latitude": 8.4732,
-            "Longitude": 6.9421,
-            "Enumerator_Remarks": "Demo registered farmer",
-            "Photo_Path": "",
-            "Photo_Status": "No Photo",
-        },
-        {
-            "Farmer_ID": "AG-202604220002",
-            "Registration_Date": "2026-04-22 08:35:00",
-            "Agent_ID": "FCT-01",
-            "Farmer_Full_Name": "Aisha Bello",
-            "Gender": "Female",
-            "Date_of_Birth": "1992-09-18",
-            "Phone_Number": "08039876543",
-            "Alternate_Phone": "",
-            "Email_Address": "aisha@example.com",
-            "NIN": "12345678902",
-            "State": "FCT",
-            "LGA": "Gwagwalada",
-            "Ward": "Ward 2",
-            "Community_Village": "Paiko",
-            "Residential_Address": "Gwagwalada, FCT",
-            "Primary_Crop": "Maize",
-            "Secondary_Crop": "Soybean",
-            "Farm_Size_Ha": 2.0,
-            "Input_Distributed": "Maize Seeds, Organic Fertilizer",
-            "Quantity_Units": 2,
-            "NIN_Status": "Pending",
-            "ID_Type": "Voter Card",
-            "ID_Number": "PVC-002",
-            "Latitude": 8.9390,
-            "Longitude": 7.0819,
-            "Enumerator_Remarks": "Awaiting NIN verification",
-            "Photo_Path": "",
-            "Photo_Status": "No Photo",
-        },
-        {
-            "Farmer_ID": "AG-202604220003",
-            "Registration_Date": "2026-04-22 09:05:00",
-            "Agent_ID": "KN-01",
-            "Farmer_Full_Name": "Sani Yakubu",
-            "Gender": "Male",
-            "Date_of_Birth": "1985-03-03",
-            "Phone_Number": "08052345678",
-            "Alternate_Phone": "",
-            "Email_Address": "sani@example.com",
-            "NIN": "12345678903",
-            "State": "Kano",
-            "LGA": "Nassarawa",
-            "Ward": "Ward 3",
-            "Community_Village": "Tudun Wada",
-            "Residential_Address": "Kano",
-            "Primary_Crop": "Rice",
-            "Secondary_Crop": "Groundnut",
-            "Farm_Size_Ha": 4.2,
-            "Input_Distributed": "Rice Seeds, NPK, Herbicide, Sprayer",
-            "Quantity_Units": 4,
-            "NIN_Status": "Verified",
-            "ID_Type": "Driver's License",
-            "ID_Number": "DL-003",
-            "Latitude": 11.9790,
-            "Longitude": 8.5214,
-            "Enumerator_Remarks": "Demo record from Kano cluster",
-            "Photo_Path": "",
-            "Photo_Status": "No Photo",
-        },
-    ]
-
-    for row in demo_rows:
-        insert_farmer(row)
-
-
 init_db()
-seed_default_users()
-seed_demo_agents()
-seed_demo_data()
+# seed_default_users()
 
 if "farmer_form_version" not in st.session_state:
     st.session_state["farmer_form_version"] = 0
 
 form_v = st.session_state["farmer_form_version"]
+
 # =========================================================
 # 1. PAGE CONFIG
 # =========================================================
@@ -608,8 +458,6 @@ def is_db_available() -> bool:
     except Exception:
         return False
     
-
-
 def generate_farmer_id_card_pdf(selected_row, photo_path, logo_path=None):
     buffer = BytesIO()
 
@@ -1212,16 +1060,18 @@ else:
     verification_rate = round((total_verified / total_beneficiaries) * 100, 1) if total_beneficiaries > 0 else 0.0
 
     # =========================================================
-    # TAB LAYOUT
+    # PAGE LAYOUT
     # =========================================================
-    tab_dashboard, tab_farmer_registration, tab_distribution, tab_analytics = st.tabs(
-        ["📊 Dashboard", "📝 Farmer Registration", "📦 Distribution", "📈 Analytics"]
+    page_choice = st.selectbox(
+        "Navigate",
+        ["Dashboard", "Register", "Distribution", "Analytics"],
+        key="mobile_nav"
     )
 
     # =========================================================
-    # TAB 1: DASHBOARD
+    # PAGE 1: DASHBOARD
     # =========================================================
-    with tab_dashboard:
+    if page_choice == "Dashboard":
         total_agents = len(fetch_all_agents()) if role == "admin" else 0
 
         registrations_today = 0
@@ -1240,17 +1090,19 @@ else:
 
         st.markdown("### National Performance Overview")
 
-        row1 = st.columns(4)
+        row1 = st.columns(2)
+        row2 = st.columns(2)
+        row3 = st.columns(2)
+        row4 = st.columns(2)
+
         row1[0].metric("Beneficiaries", total_beneficiaries)
         row1[1].metric("Verified NIN", total_verified)
-        row1[2].metric("Land Coverage (Ha)", f"{total_land:.1f}")
-        row1[3].metric("Verification Rate", f"{verification_rate}%")
-
-        row2 = st.columns(4)
-        row2[0].metric("Registrations Today", registrations_today)
-        row2[1].metric("Pending NIN", pending_nin)
-        row2[2].metric("Rejected NIN", rejected_nin)
-        row2[3].metric("Captured Photos", captured_photos)
+        row2[0].metric("Land Coverage (Ha)", f"{total_land:.1f}")
+        row2[1].metric("Verification Rate", f"{verification_rate}%")
+        row3[0].metric("Registrations Today", registrations_today)
+        row3[1].metric("Pending NIN", pending_nin)
+        row4[0].metric("Rejected NIN", rejected_nin)
+        row4[1].metric("Captured Photos", captured_photos)
 
         if role == "admin":
             st.markdown("### Admin Monitoring Snapshot")
@@ -1374,9 +1226,9 @@ else:
             st.info("No queue records")
 
     # =========================================================
-    # TAB 2: REGISTER FARMER
+    # PAGE 2: REGISTER FARMER
     # =========================================================
-    with tab_farmer_registration:
+    elif page_choice == "Register":
         st.info("Complete each section carefully and click 'Sync Secure Record' only after all required information has been entered.")
 
         if "registration_success" in st.session_state:
@@ -1569,9 +1421,9 @@ else:
                 st.rerun()
 
     # =========================================================
-    # TAB 3: DISTRIBUTION
+    # PAGE 3: DISTRIBUTION
     # =========================================================
-    with tab_distribution:
+    elif page_choice == "Distribution":
         st.subheader("Input Breakdown")
 
         if not df.empty:
@@ -1605,21 +1457,19 @@ else:
 
             st.rerun()
 
-        search_col1, search_col2, search_col3, search_col4 = st.columns(4)
-
+        search_col1, search_col2 = st.columns(2)
         with search_col1:
             search_name = st.text_input("Search Farmer Name", key="search_name")
-
         with search_col2:
             search_agent = st.text_input("Search Agent ID", key="search_agent", placeholder="e.g. FCT-01")
 
+        search_col3, search_col4 = st.columns(2)
         with search_col3:
             filter_nin_status = st.selectbox(
                 "Filter NIN Status",
                 ["All", "Verified", "Pending", "Rejected"],
                 key="filter_nin_status"
             )
-
         with search_col4:
             filter_photo_status = st.selectbox(
                 "Filter Photo Status",
@@ -1783,12 +1633,12 @@ else:
             table_to_csv_download(display_df, "agrow_master_registry.csv")
 
         with download_col2:
-            table_to_excel_download(display_df, "agrow_master_registry.xlsx")       
+            table_to_excel_download(display_df, "agrow_master_registry.xlsx")
 
     # =========================================================
-    # TAB 4: ANALYTICS
+    # PAGE 4: ANALYTICS
     # =========================================================
-    with tab_analytics:
+    elif page_choice == "Analytics":
         c1, c2 = st.columns(2)
 
         with c1:

@@ -1,6 +1,10 @@
 ﻿import os
+import qrcode
 from io import BytesIO
 from datetime import datetime
+import hmac
+import hashlib
+import time
 
 import pandas as pd
 import plotly.express as px
@@ -31,7 +35,7 @@ from services.user_service import (
 )
 
 load_dotenv()
-APP_BASE_URL = os.getenv("APP_BASE_URL", "http://localhost:8501")
+APP_BASE_URL = "https://agrow-nigeria-field-intelligence-platform.onrender.com"
 
 
 def seed_default_users():
@@ -488,6 +492,25 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+def generate_qr_code(url):
+    qr = qrcode.make(url)
+    buffer = BytesIO()
+    qr.save(buffer, format="PNG")
+    buffer.seek(0)
+    return buffer
+
+QR_SECRET_KEY = os.getenv("QR_SECRET_KEY", "change-this-secret-key")
+
+def generate_qr_signature(farmer_id):
+    message = farmer_id.encode()
+    secret = QR_SECRET_KEY.encode()
+    return hmac.new(secret, message, hashlib.sha256).hexdigest()
+
+
+def verify_qr_signature(farmer_id, sig):
+    expected_sig = generate_qr_signature(farmer_id)
+    return hmac.compare_digest(expected_sig, sig)
+
 # =========================================================
 # 5. HELPERS
 # =========================================================
@@ -556,9 +579,8 @@ def get_state_prefix(state_name: str) -> str:
     return special_map.get(state_name, state_name[:2].upper())
 
 
-def valid_phone(phone: str) -> bool:
-    digits = "".join(c for c in phone if c.isdigit())
-    return len(digits) == 11
+def valid_phone(phone):
+    return phone.isdigit() and 10 <= len(phone) <= 11
 
 
 def valid_nin(nin: str) -> bool:
@@ -608,7 +630,15 @@ def is_db_available() -> bool:
     except Exception:
         return False
     
+def generate_farmer_qr_code(farmer_id: str):
+    verification_url = f"{APP_BASE_URL}?farmer_id={farmer_id}"
 
+    qr = qrcode.make(verification_url)
+    buffer = BytesIO()
+    qr.save(buffer, format="PNG")
+    buffer.seek(0)
+
+    return buffer
 
 def generate_farmer_id_card_pdf(selected_row, photo_path, logo_path=None):
     buffer = BytesIO()
@@ -695,14 +725,21 @@ def generate_farmer_id_card_pdf(selected_row, photo_path, logo_path=None):
     c.drawString(text_x, text_y - (5 * line_gap), f"Crop: {selected_row.get('primary_crop', '-')}")
 
     # QR content
-    farmer_id_value = selected_row.get("farmer_id", "")
-    APP_BASE_URL = os.getenv("APP_BASE_URL", "http://localhost:8501")
-    verification_url = f"{APP_BASE_URL}/?farmer_id={farmer_id_value}"
+    def generate_farmer_id_card_pdf(selected_row):
+
+     farmer_id_value = selected_row.get("farmer_id", "")
+
+    farmer_id_value = selected_row.get("farmer_id", selected_row.get("Farmer_ID", ""))
+    sig = generate_qr_signature(farmer_id_value)
+
+    verification_url = f"{APP_BASE_URL}?farmer_id={farmer_id_value}&sig={sig}"
 
     qr = qrcode.make(verification_url)
     qr_buffer = BytesIO()
     qr.save(qr_buffer, format="PNG")
     qr_buffer.seek(0)
+
+    # continue PDF drawing...
 
     qr_size = 16 * mm
     qr_x = width - qr_size - padding
@@ -962,71 +999,85 @@ def show_auth():
 
     st.markdown("</div>", unsafe_allow_html=True)
 
+def generate_qr_code(url):
+    qr = qrcode.make(url)
+    buffer = BytesIO()
+    qr.save(buffer, format="PNG")
+    buffer.seek(0)
+    return buffer
+
+
 def show_public_farmer_verification():
-    st.markdown("### 🔎 Farmer Self Access Portal")
-    st.info("Farmers can search using their Farmer ID or Phone Number.")
+    st.markdown("### 🔎 Farmer Verification Portal")
+    st.info("Scan QR code or search using Farmer ID / Phone Number.")
 
     query_params = st.query_params
-    prefilled_farmer_id = query_params.get("farmer_id", "")
+    farmer_id_lookup = query_params.get("farmer_id", "")
+    sig = query_params.get("sig", "")
+    phone_lookup = ""
 
-    col1, col2 = st.columns(2)
+    if farmer_id_lookup and sig:
+        if not verify_qr_signature(farmer_id_lookup, sig):
+            st.error("❌ Invalid or tampered QR code.")
+            return
 
-    with col1:
-        farmer_id_lookup = st.text_input(
-            "Enter Farmer ID",
-            value=prefilled_farmer_id,
-            placeholder="e.g. AG-20260416074143",
-            key="public_farmer_id_lookup",
+    if not farmer_id_lookup:
+        col1, col2 = st.columns(2)
+
+        with col1:
+            farmer_id_lookup = st.text_input(
+                "Enter Farmer ID",
+                placeholder="e.g. AG-20260416074143",
+                key="public_farmer_id_lookup",
+            )
+
+        with col2:
+            phone_lookup = st.text_input(
+                "Enter Phone Number",
+                placeholder="e.g. 08123456789",
+                key="public_phone_lookup",
+            )
+
+        search_clicked = st.button(
+            "Search Farmer Record",
+            key="public_farmer_search",
+            use_container_width=True,
         )
 
-    with col2:
-        phone_lookup = st.text_input(
-            "Enter Phone Number",
-            placeholder="e.g. 08123456789",
-            key="public_phone_lookup",
-        )
+        if not search_clicked:
+            return
 
-    auto_search = bool(prefilled_farmer_id)
-    search_clicked = st.button(
-        "Search Farmer Record",
-        key="public_farmer_search",
-        use_container_width=True,
-    )
-
-    if not (search_clicked or auto_search):
-        return
+        if not farmer_id_lookup.strip() and not phone_lookup.strip():
+            st.warning("Enter Farmer ID or Phone Number.")
+            return
 
     df = fetch_farmers()
 
     if df.empty:
-        st.warning("No farmer records available yet.")
+        st.warning("No farmer records available.")
         return
 
-    result_df = df.copy()
+    record = df.copy()
 
     if farmer_id_lookup.strip():
-        result_df = result_df[
-            result_df["farmer_id"].astype(str).str.strip() == farmer_id_lookup.strip()
+        record = record[
+            record["farmer_id"].astype(str).str.strip().str.upper()
+            == farmer_id_lookup.strip().upper()
+        ]
+    elif phone_lookup.strip():
+        record = record[
+            record["phone_number"].astype(str).str.strip()
+            == phone_lookup.strip()
         ]
 
-    if phone_lookup.strip():
-        result_df = result_df[
-            result_df["phone_number"].astype(str).str.strip() == phone_lookup.strip()
-        ]
-
-    if not farmer_id_lookup.strip() and not phone_lookup.strip():
-        st.warning("Enter Farmer ID or Phone Number to search.")
+    if record.empty:
+        st.error("❌ INVALID FARMER RECORD")
         return
 
-    if result_df.empty:
-        st.warning("No farmer record found.")
-        return
-
-    farmer = result_df.iloc[0]
+    farmer = record.iloc[0]
     photo_path = farmer.get("photo_path", "")
-    logo_path = get_logo_path()
 
-    st.success("Farmer record found.")
+    st.success("✅ Farmer Verified")
 
     col1, col2 = st.columns([1, 2])
 
@@ -1034,38 +1085,32 @@ def show_public_farmer_verification():
         if photo_path and os.path.exists(photo_path):
             st.image(photo_path, width=220)
         else:
-            st.warning("No farmer photo available.")
+            st.warning("No photo available.")
 
     with col2:
         st.markdown(f"""
-### Farmer ID Preview
-
 **Farmer ID:** {farmer.get('farmer_id', '-')}  
-**Full Name:** {farmer.get('farmer_full_name', '-')}  
-**Phone Number:** {farmer.get('phone_number', '-')}  
-**Gender:** {farmer.get('gender', '-')}  
-**Primary Crop:** {farmer.get('primary_crop', '-')}  
+**Name:** {farmer.get('farmer_full_name', '-')}  
+**Phone:** {farmer.get('phone_number', '-')}  
 **State:** {normalize_state_name(farmer.get('state', '-'))}  
 **LGA:** {farmer.get('lga', '-')}  
+**Crop:** {farmer.get('primary_crop', '-')}  
 **NIN Status:** {farmer.get('nin_status', '-')}  
-**Registration Date:** {farmer.get('registration_date', '-')}  
-**Photo Status:** {farmer.get('photo_status', '-')}  
         """)
 
-        pdf_file = generate_farmer_id_card_pdf(
-            selected_row=farmer,
-            photo_path=photo_path,
-            logo_path=logo_path,
-        )
+    pdf_file = generate_farmer_id_card_pdf(
+        selected_row=farmer,
+        photo_path=photo_path,
+        logo_path=get_logo_path(),
+    )
 
-        st.download_button(
-            label="⬇️ Download Farmer ID Card (PDF)",
-            data=pdf_file.getvalue(),
-            file_name=f"{farmer.get('farmer_id', 'farmer')}_ID_Card.pdf",
-            mime="application/pdf",
-            use_container_width=True,
-        )
-
+    st.download_button(
+        label="⬇️ Download Farmer ID Card",
+        data=pdf_file.getvalue(),
+        file_name=f"{farmer.get('farmer_id', 'farmer')}_ID_Card.pdf",
+        mime="application/pdf",
+        use_container_width=True,
+    )
 
 # =========================================================
 # 9. APP BODY
@@ -1079,6 +1124,26 @@ else:
     user_id = st.session_state.user_id
     role = st.session_state.role
     user_meta = fetch_user(user_id) or {}
+
+    # continue dashboard here...
+
+    # logged-in dashboard continues here
+
+    if not user_id or not role:
+     st.session_state.logged_in = False
+     st.session_state.user_id = None
+     st.session_state.role = None
+     st.warning("Session expired. Please log in again.")
+     show_auth()
+     st.stop()
+
+    def is_db_available():
+        try:
+            conn = get_connection()
+            conn.close()
+            return True
+        except Exception:
+            return False
 
     logo_path = get_logo_path()
 
@@ -1124,8 +1189,8 @@ else:
             unsafe_allow_html=True,
         )
 
-    st.sidebar.subheader(f"👤 User: {user_id}")
-    st.sidebar.write(f"**Role:** {role.title()}")
+    st.sidebar.subheader(f"👤 User: {user_id or 'Guest'}")
+    st.sidebar.write(f"**Role:** {(role or 'Guest').title()}")
 
     if role == "agent":
         st.sidebar.write(f"**Coverage State:** {normalize_state_name(user_meta.get('state', '-'))}")
@@ -1183,15 +1248,35 @@ else:
         unsafe_allow_html=True,
     )
 
-    # -------------------------
-    # Online / Offline indicator
-    # -------------------------
-    online_status = is_db_available()
+    st.info("⚠️ Demo Mode: Sample data displayed for presentation purposes")
+    st.caption("Powered by DataDev Limited | National Digital Agriculture Prototype")
 
-    if online_status:
-        st.success("🟢 Online Mode: records will save directly to the main database.")
+    if is_db_available():
+        st.success("🟢 ONLINE MODE: Data syncing to central database")
     else:
-        st.warning("🟠 Offline Mode: records will be saved locally and queued for sync.")
+        st.warning("🟡 OFFLINE MODE: Data stored locally and will sync later")
+
+    if role == "admin":
+        st.markdown("### 🌐 Live Prototype Access")
+
+        qr_img = generate_qr_code(APP_BASE_URL)
+
+        qr_col1, qr_col2 = st.columns([1, 4])
+
+        with qr_col1:
+            st.image(qr_img, width=150)
+
+        with qr_col2:
+            st.caption("Scan this QR code to open the AGROW platform on another device.")
+            st.download_button(
+                label="⬇️ Download QR Code",
+                data=qr_img.getvalue(),
+                file_name="agrow_platform_qr.png",
+                mime="image/png",
+                use_container_width=False,
+            )
+
+        st.divider()
 
     st.caption(f"Last sync check: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 

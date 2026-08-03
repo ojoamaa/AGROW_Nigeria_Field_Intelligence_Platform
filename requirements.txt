@@ -8,3 +8,4 @@ qrcode
 pillow	
 openpyxl
 reportlab
+streamlit-geolocation

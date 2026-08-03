@@ -1,272 +1,67 @@
 import json
 from datetime import datetime
-
 import pandas as pd
-from core.db import get_connection
+from sqlalchemy import text
+from core.db import get_engine
 
+engine = get_engine()
 
 def fetch_farmers():
-    conn = get_connection()
-    df = pd.read_sql_query(
-        "SELECT * FROM farmers ORDER BY registration_date DESC",
-        conn
-    )
-    conn.close()
-    return df
-
+    return pd.read_sql_query(text("SELECT * FROM farmers ORDER BY registration_date DESC"), engine)
 
 def farmer_exists_today(phone_number: str, nin: str, farmer_full_name: str) -> bool:
-    conn = get_connection()
-    cursor = conn.cursor()
-
-    cursor.execute(
-        """
-        SELECT farmer_id
-        FROM farmers
-        WHERE phone_number = ?
-          AND nin = ?
-          AND LOWER(farmer_full_name) = LOWER(?)
-          AND date(registration_date) = date('now', 'localtime')
-        LIMIT 1
-        """,
-        (phone_number, nin, farmer_full_name),
-    )
-
-    row = cursor.fetchone()
-    conn.close()
+    today = datetime.now().strftime("%Y-%m-%d")
+    with engine.connect() as conn:
+        row = conn.execute(text("""
+            SELECT farmer_id FROM farmers
+            WHERE phone_number=:phone AND nin=:nin
+              AND LOWER(farmer_full_name)=LOWER(:name)
+              AND SUBSTRING(registration_date,1,10)=:today
+            LIMIT 1
+        """), dict(phone=phone_number, nin=nin, name=farmer_full_name, today=today)).first()
     return row is not None
 
-
 def insert_farmer(row: dict):
-    conn = get_connection()
-    cursor = conn.cursor()
-
-    cursor.execute(
-        """
-        INSERT INTO farmers (
-            farmer_id,
-            registration_date,
-            agent_id,
-            farmer_full_name,
-            gender,
-            date_of_birth,
-            phone_number,
-            alternate_phone,
-            email_address,
-            nin,
-            state,
-            lga,
-            ward,
-            community_village,
-            residential_address,
-            primary_crop,
-            secondary_crop,
-            farm_size_ha,
-            input_distributed,
-            quantity_units,
-            nin_status,
-            id_type,
-            id_number,
-            latitude,
-            longitude,
-            enumerator_remarks,
-            photo_path,
-            photo_status
-        )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            row["Farmer_ID"],
-            row["Registration_Date"],
-            row["Agent_ID"],
-            row["Farmer_Full_Name"],
-            row["Gender"],
-            row["Date_of_Birth"],
-            row["Phone_Number"],
-            row["Alternate_Phone"],
-            row["Email_Address"],
-            row["NIN"],
-            row["State"],
-            row["LGA"],
-            row["Ward"],
-            row["Community_Village"],
-            row["Residential_Address"],
-            row["Primary_Crop"],
-            row["Secondary_Crop"],
-            row["Farm_Size_Ha"],
-            row["Input_Distributed"],
-            row["Quantity_Units"],
-            row["NIN_Status"],
-            row["ID_Type"],
-            row["ID_Number"],
-            row["Latitude"],
-            row["Longitude"],
-            row["Enumerator_Remarks"],
-            row["Photo_Path"],
-            row["Photo_Status"],
-        ),
-    )
-
-    conn.commit()
-    conn.close()
-
+    mapping = {
+      "farmer_id":"Farmer_ID","registration_date":"Registration_Date","agent_id":"Agent_ID",
+      "farmer_full_name":"Farmer_Full_Name","gender":"Gender","date_of_birth":"Date_of_Birth",
+      "phone_number":"Phone_Number","alternate_phone":"Alternate_Phone","email_address":"Email_Address",
+      "nin":"NIN","state":"State","lga":"LGA","ward":"Ward","community_village":"Community_Village",
+      "residential_address":"Residential_Address","primary_crop":"Primary_Crop","secondary_crop":"Secondary_Crop",
+      "farm_size_ha":"Farm_Size_Ha","input_distributed":"Input_Distributed","quantity_units":"Quantity_Units",
+      "nin_status":"NIN_Status","id_type":"ID_Type","id_number":"ID_Number","latitude":"Latitude",
+      "longitude":"Longitude","enumerator_remarks":"Enumerator_Remarks","photo_path":"Photo_Path",
+      "photo_status":"Photo_Status"}
+    params={db: row.get(src) for db,src in mapping.items()}
+    cols=", ".join(mapping.keys()); vals=", ".join(f":{k}" for k in mapping)
+    with engine.begin() as conn:
+        conn.execute(text(f"INSERT INTO farmers ({cols}) VALUES ({vals})"), params)
 
 def save_to_offline_queue(row: dict):
-    conn = get_connection()
-    cursor = conn.cursor()
-
-    cursor.execute(
-        """
-        INSERT INTO offline_queue (
-            farmer_id,
-            payload,
-            sync_status,
-            created_at,
-            synced_at,
-            error_message
-        )
-        VALUES (?, ?, 'PENDING', ?, NULL, NULL)
-        """,
-        (
-            row["Farmer_ID"],
-            json.dumps(row),
-            datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        ),
-    )
-
-    conn.commit()
-    conn.close()
-
+    with engine.begin() as conn:
+        conn.execute(text("""INSERT INTO offline_queue
+            (farmer_id,payload,sync_status,created_at,synced_at,error_message)
+            VALUES (:farmer_id,:payload,'PENDING',:created_at,NULL,NULL)"""),
+            dict(farmer_id=row["Farmer_ID"], payload=json.dumps(row), created_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
 
 def fetch_offline_queue():
-    conn = get_connection()
-    df = pd.read_sql_query(
-        "SELECT * FROM offline_queue ORDER BY created_at DESC",
-        conn
-    )
-    conn.close()
-    return df
-
+    return pd.read_sql_query(text("SELECT * FROM offline_queue ORDER BY created_at DESC"), engine)
 
 def sync_offline_queue():
-    conn = get_connection()
-    cursor = conn.cursor()
-
-    cursor.execute("""
-        SELECT id, payload
-        FROM offline_queue
-        WHERE sync_status IN ('PENDING', 'FAILED')
-        ORDER BY created_at ASC
-    """)
-    queue_rows = cursor.fetchall()
-
-    synced_count = 0
-    failed_count = 0
-
-    for queue_id, payload in queue_rows:
+    with engine.begin() as conn:
+        rows=conn.execute(text("SELECT id,payload FROM offline_queue WHERE sync_status IN ('PENDING','FAILED') ORDER BY created_at")).mappings().all()
+    synced=failed=0
+    for item in rows:
         try:
-            row = json.loads(payload)
-
-            # avoid duplicate insert by farmer_id
-            cursor.execute(
-                "SELECT farmer_id FROM farmers WHERE farmer_id = ? LIMIT 1",
-                (row["Farmer_ID"],)
-            )
-            existing = cursor.fetchone()
-
-            if existing is None:
-                cursor.execute(
-                    """
-                    INSERT INTO farmers (
-                        farmer_id,
-                        registration_date,
-                        agent_id,
-                        farmer_full_name,
-                        gender,
-                        date_of_birth,
-                        phone_number,
-                        alternate_phone,
-                        email_address,
-                        nin,
-                        state,
-                        lga,
-                        ward,
-                        community_village,
-                        residential_address,
-                        primary_crop,
-                        secondary_crop,
-                        farm_size_ha,
-                        input_distributed,
-                        quantity_units,
-                        nin_status,
-                        id_type,
-                        id_number,
-                        latitude,
-                        longitude,
-                        enumerator_remarks,
-                        photo_path,
-                        photo_status
-                    )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        row["Farmer_ID"],
-                        row["Registration_Date"],
-                        row["Agent_ID"],
-                        row["Farmer_Full_Name"],
-                        row["Gender"],
-                        row["Date_of_Birth"],
-                        row["Phone_Number"],
-                        row["Alternate_Phone"],
-                        row["Email_Address"],
-                        row["NIN"],
-                        row["State"],
-                        row["LGA"],
-                        row["Ward"],
-                        row["Community_Village"],
-                        row["Residential_Address"],
-                        row["Primary_Crop"],
-                        row["Secondary_Crop"],
-                        row["Farm_Size_Ha"],
-                        row["Input_Distributed"],
-                        row["Quantity_Units"],
-                        row["NIN_Status"],
-                        row["ID_Type"],
-                        row["ID_Number"],
-                        row["Latitude"],
-                        row["Longitude"],
-                        row["Enumerator_Remarks"],
-                        row["Photo_Path"],
-                        row["Photo_Status"],
-                    ),
-                )
-
-            cursor.execute(
-                """
-                UPDATE offline_queue
-                SET sync_status = 'SYNCED',
-                    synced_at = ?,
-                    error_message = NULL
-                WHERE id = ?
-                """,
-                (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), queue_id),
-            )
-
-            synced_count += 1
-
-        except Exception as e:
-            cursor.execute(
-                """
-                UPDATE offline_queue
-                SET sync_status = 'FAILED',
-                    error_message = ?
-                WHERE id = ?
-                """,
-                (str(e), queue_id),
-            )
-            failed_count += 1
-
-    conn.commit()
-    conn.close()
-
-    return synced_count, failed_count
+            payload=json.loads(item['payload'])
+            with engine.connect() as conn:
+                exists=conn.execute(text("SELECT 1 FROM farmers WHERE farmer_id=:fid"), {'fid':payload['Farmer_ID']}).first()
+            if not exists: insert_farmer(payload)
+            with engine.begin() as conn:
+                conn.execute(text("UPDATE offline_queue SET sync_status='SYNCED',synced_at=:t,error_message=NULL WHERE id=:id"), {'t':datetime.now().strftime('%Y-%m-%d %H:%M:%S'),'id':item['id']})
+            synced+=1
+        except Exception as exc:
+            with engine.begin() as conn:
+                conn.execute(text("UPDATE offline_queue SET sync_status='FAILED',error_message=:e WHERE id=:id"), {'e':str(exc)[:500],'id':item['id']})
+            failed+=1
+    return synced, failed

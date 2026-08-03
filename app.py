@@ -1,4 +1,5 @@
-﻿import os
+import os
+import socket
 import qrcode
 from io import BytesIO
 from datetime import datetime
@@ -8,17 +9,20 @@ import time
 
 import pandas as pd
 import plotly.express as px
-import qrcode
 import streamlit as st
+from streamlit_geolocation import streamlit_geolocation
 from dotenv import load_dotenv
 from reportlab.lib.units import mm
 from reportlab.pdfgen import canvas
 from reportlab.lib.utils import ImageReader
+from PIL import Image, ImageDraw, ImageFont
+import re
 
 from nigeria_lga_data import NIGERIA_LGA_MAP
-from core.db import get_connection, init_db
+from core.db import get_connection, init_db, get_engine, DB_BACKEND
+from core.config import AGENT_PHOTO_DIR
+from core.settings import invite_code_matches, get_invite_source, get_organisation_invite_code
 from services.log_service import log_action
-from services.id_service import generate_agent_id_db
 from services.farmer_service import (
     fetch_farmers,
     farmer_exists_today,
@@ -32,10 +36,33 @@ from services.user_service import (
     insert_user,
     update_user_password,
     fetch_all_agents,
+    generate_agent_id_db,
 )
 
 load_dotenv()
-APP_BASE_URL = "https://agrow-nigeria-field-intelligence-platform.onrender.com"
+APP_BASE_URL = os.getenv(
+    "AGROW_LOCAL_BASE_URL",
+    os.getenv(
+        "APP_BASE_URL",
+        "https://agrow-nigeria-field-intelligence-platform.onrender.com",
+    ),
+).rstrip("/")
+
+
+def get_effective_app_base_url() -> str:
+    """Return a QR-reachable base URL for production or local phone testing."""
+    configured = (APP_BASE_URL or "http://localhost:8501").rstrip("/")
+    if "localhost" not in configured and "127.0.0.1" not in configured:
+        return configured
+
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.connect(("8.8.8.8", 80))
+        lan_ip = sock.getsockname()[0]
+        sock.close()
+        return configured.replace("localhost", lan_ip).replace("127.0.0.1", lan_ip)
+    except Exception:
+        return configured
 
 
 def seed_default_users():
@@ -188,6 +215,10 @@ def seed_demo_data():
 init_db()
 seed_default_users()
 seed_demo_agents()
+
+# Non-secret startup diagnostics. This helps identify configuration mismatches
+# without exposing invite codes, database credentials, or signing keys.
+STARTUP_INVITE_SOURCE = get_invite_source()
 seed_demo_data()
 
 if "farmer_form_version" not in st.session_state:
@@ -198,7 +229,7 @@ form_v = st.session_state["farmer_form_version"]
 # 1. PAGE CONFIG
 # =========================================================
 st.set_page_config(
-    page_title="AGROW Nigeria Digital Field Intelligence Platform",
+    page_title="AGROW — Agricultural Geographic Registration & Operations Workspace",
     page_icon="🌾",
     layout="wide",
     initial_sidebar_state="collapsed",
@@ -499,6 +530,50 @@ def generate_qr_code(url):
     buffer.seek(0)
     return buffer
 
+def safe_filename(value: str) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9_-]+", "_", str(value or "").strip())
+    return cleaned.strip("_") or "farmer"
+
+def build_farmer_qr_identity_image(farmer, verification_url: str):
+    width, height = 900, 1100
+    card = Image.new("RGB", (width, height), "white")
+    draw = ImageDraw.Draw(card)
+    font = ImageFont.load_default()
+    qr = qrcode.QRCode(box_size=10, border=4)
+    qr.add_data(verification_url); qr.make(fit=True)
+    qr_img = qr.make_image(fill_color="black", back_color="white").convert("RGB")
+    qr_img.thumbnail((620, 620))
+    draw.rectangle((20, 20, width-20, height-20), outline=(0,83,141), width=8)
+    details = [
+        "AGROW FARMER IDENTIFICATION QR",
+        f"Name: {farmer.get('farmer_full_name', '-')}",
+        f"Farmer ID: {farmer.get('farmer_id', '-')}",
+        f"State: {normalize_state_name(farmer.get('state', '-'))}",
+        f"LGA: {farmer.get('lga', '-')}",
+        f"Community: {farmer.get('community', '-')}",
+        f"Primary Crop: {farmer.get('primary_crop', '-')}",
+    ]
+    y=55
+    for line in details:
+        draw.text((55,y), line, fill=(0,83,141) if y==55 else "black", font=font); y += 40
+    card.paste(qr_img, ((width-qr_img.width)//2, 360))
+    draw.text((55,1020), "Scan to verify this farmer's AGROW record.", fill=(55,55,55), font=font)
+    out=BytesIO(); card.save(out, format="PNG"); out.seek(0); return out
+
+STATE_GPS_ENVELOPES = {
+    "Jigawa": (10.5, 13.2, 8.0, 10.7),
+    "Kano": (10.4, 12.7, 7.5, 9.7),
+    "Kaduna": (9.0, 11.8, 6.0, 9.0),
+    "FCT": (8.2, 9.4, 6.6, 7.8),
+    "Federal Capital Territory": (8.2, 9.4, 6.6, 7.8),
+}
+
+def gps_matches_assigned_state(state_name, latitude, longitude):
+    bounds = STATE_GPS_ENVELOPES.get(str(state_name or "").strip())
+    if not bounds: return None
+    a,b,c,d = bounds
+    return a <= latitude <= b and c <= longitude <= d
+
 QR_SECRET_KEY = os.getenv("QR_SECRET_KEY", "change-this-secret-key")
 
 def generate_qr_signature(farmer_id):
@@ -601,7 +676,7 @@ def table_to_csv_download(df: pd.DataFrame, filename: str):
         data=csv_data,
         file_name=filename,
         mime="text/csv",
-        use_container_width=True,
+        width="stretch",
     )
 
 
@@ -618,20 +693,20 @@ def table_to_excel_download(df: pd.DataFrame, filename: str):
         data=output.getvalue(),
         file_name=filename,
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        use_container_width=True,
+        width="stretch",
     )
 
 def is_db_available() -> bool:
     try:
-        conn = get_connection()
-        conn.execute("SELECT 1")
-        conn.close()
+        from sqlalchemy import text
+        with get_engine().connect() as conn:
+            conn.execute(text("SELECT 1"))
         return True
     except Exception:
         return False
     
 def generate_farmer_qr_code(farmer_id: str):
-    verification_url = f"{APP_BASE_URL}?farmer_id={farmer_id}"
+    verification_url = f"{get_effective_app_base_url()}?farmer_id={farmer_id}"
 
     qr = qrcode.make(verification_url)
     buffer = BytesIO()
@@ -641,56 +716,70 @@ def generate_farmer_qr_code(farmer_id: str):
     return buffer
 
 def generate_farmer_id_card_pdf(selected_row, photo_path, logo_path=None):
+    """Create a print-ready CR80 AGROW Farmer ID card with a signed QR code."""
     buffer = BytesIO()
-
-    # Standard CR80 ID card size
     card_width = 85.6 * mm
     card_height = 54 * mm
-
     c = canvas.Canvas(buffer, pagesize=(card_width, card_height))
-    width, height = card_width, card_height
 
-    padding = 4 * mm
+    def value(*keys, default="-"):
+        for key in keys:
+            raw = selected_row.get(key)
+            if raw is not None and str(raw).strip() and str(raw).lower() != "nan":
+                return str(raw).strip()
+        return default
 
-    # Outer border
-    c.setStrokeColorRGB(0.12, 0.35, 0.18)
-    c.setLineWidth(1)
-    c.roundRect(1.5, 1.5, width - 3, height - 3, 3, stroke=1, fill=0)
+    def clipped(text, limit):
+        text = str(text or "-")
+        return text if len(text) <= limit else text[: max(1, limit - 1)] + "…"
 
-    # Header bar
-    header_h = 10 * mm
+    farmer_id = value("farmer_id", "Farmer_ID")
+    farmer_name = value("farmer_full_name", "Farmer_Full_Name")
+    state = normalize_state_name(value("state", "State"))
+    lga = value("lga", "LGA")
+    phone = value("phone_number", "Phone_Number")
+    crop = value("primary_crop", "Primary_Crop")
+    issue_date = datetime.now().strftime("%d %b %Y")
+
+    # Background and border.
+    c.setFillColorRGB(1, 1, 1)
+    c.rect(0, 0, card_width, card_height, stroke=0, fill=1)
+    c.setStrokeColorRGB(0.10, 0.36, 0.16)
+    c.setLineWidth(1.2)
+    c.roundRect(1.5, 1.5, card_width - 3, card_height - 3, 4, stroke=1, fill=0)
+
+    # Branded header.
+    header_h = 11 * mm
     c.setFillColorRGB(0.0, 0.29, 0.53)
-    c.roundRect(1.5, height - header_h - 1.5, width - 3, header_h, 3, stroke=0, fill=1)
+    c.roundRect(1.5, card_height - header_h - 1.5, card_width - 3, header_h, 4, stroke=0, fill=1)
+    c.rect(1.5, card_height - header_h - 1.5, card_width - 3, 4, stroke=0, fill=1)
 
-    # Logo
     if logo_path and os.path.exists(logo_path):
         try:
             c.drawImage(
                 logo_path,
-                padding,
-                height - 8.8 * mm,
-                width=7 * mm,
-                height=7 * mm,
+                4 * mm,
+                card_height - 9.7 * mm,
+                width=8 * mm,
+                height=8 * mm,
                 preserveAspectRatio=True,
-                mask='auto'
+                mask="auto",
             )
         except Exception:
             pass
 
-    # Header title
     c.setFillColorRGB(1, 1, 1)
-    c.setFont("Helvetica-Bold", 9.5)
-    c.drawCentredString(width / 2, height - 6.8 * mm, "AGROW FARMER ID CARD")
+    c.setFont("Helvetica-Bold", 9.2)
+    c.drawString(14 * mm, card_height - 6.2 * mm, "AGROW FARMER ID CARD")
+    c.setFont("Helvetica", 4.9)
+    c.drawString(14 * mm, card_height - 8.7 * mm, "Agricultural Geographic Registration & Operations Workspace")
 
-    # Photo box
-    photo_x = padding
-    photo_y = 14 * mm
-    photo_w = 23 * mm
-    photo_h = 18 * mm
-
-    c.setStrokeColorRGB(0.7, 0.7, 0.7)
-    c.rect(photo_x, photo_y, photo_w, photo_h, stroke=1, fill=0)
-
+    # Farmer photograph.
+    photo_x, photo_y = 4 * mm, 15 * mm
+    photo_w, photo_h = 22 * mm, 23 * mm
+    c.setFillColorRGB(0.96, 0.97, 0.96)
+    c.setStrokeColorRGB(0.60, 0.68, 0.61)
+    c.roundRect(photo_x, photo_y, photo_w, photo_h, 2, stroke=1, fill=1)
     if photo_path and os.path.exists(photo_path):
         try:
             c.drawImage(
@@ -700,85 +789,71 @@ def generate_farmer_id_card_pdf(selected_row, photo_path, logo_path=None):
                 width=photo_w - 2,
                 height=photo_h - 2,
                 preserveAspectRatio=True,
-                mask='auto'
+                anchor="c",
+                mask="auto",
             )
         except Exception:
+            c.setFillColorRGB(0.35, 0.35, 0.35)
             c.setFont("Helvetica", 6)
-            c.drawString(photo_x + 3, photo_y + photo_h / 2, "No Photo")
+            c.drawCentredString(photo_x + photo_w / 2, photo_y + photo_h / 2, "PHOTO")
     else:
+        c.setFillColorRGB(0.35, 0.35, 0.35)
         c.setFont("Helvetica", 6)
-        c.drawString(photo_x + 3, photo_y + photo_h / 2, "No Photo")
+        c.drawCentredString(photo_x + photo_w / 2, photo_y + photo_h / 2, "PHOTO")
 
-    # Farmer text details
-    text_x = photo_x + photo_w + 4 * mm
-    text_y = height - 15 * mm
+    # Farmer details.
+    label_x = 29 * mm
+    value_x = 41 * mm
+    y = 37 * mm
+    rows = [
+        ("NAME", clipped(farmer_name.upper(), 26)),
+        ("FARMER ID", clipped(farmer_id, 22)),
+        ("STATE", clipped(state, 18)),
+        ("LGA", clipped(lga, 18)),
+        ("PHONE", clipped(phone, 18)),
+        ("CROP", clipped(crop, 16)),
+    ]
+    for label, text in rows:
+        c.setFillColorRGB(0.30, 0.34, 0.31)
+        c.setFont("Helvetica-Bold", 4.8)
+        c.drawString(label_x, y, label)
+        c.setFillColorRGB(0.05, 0.08, 0.06)
+        c.setFont("Helvetica-Bold" if label in {"NAME", "FARMER ID"} else "Helvetica", 5.8)
+        c.drawString(value_x, y, text)
+        y -= 4.1 * mm
 
-    c.setFillColorRGB(0, 0, 0)
-    c.setFont("Helvetica-Bold", 6.7)
-
-    line_gap = 4.2 * mm
-    c.drawString(text_x, text_y, f"Name: {selected_row.get('farmer_full_name', '-')}")
-    c.drawString(text_x, text_y - line_gap, f"Farmer ID: {selected_row.get('farmer_id', '-')}")
-    c.drawString(text_x, text_y - (2 * line_gap), f"State: {normalize_state_name(selected_row.get('state', '-'))}")
-    c.drawString(text_x, text_y - (3 * line_gap), f"LGA: {selected_row.get('lga', '-')}")
-    c.drawString(text_x, text_y - (4 * line_gap), f"Phone: {selected_row.get('phone_number', '-')}")
-    c.drawString(text_x, text_y - (5 * line_gap), f"Crop: {selected_row.get('primary_crop', '-')}")
-
-    # QR content
-    def generate_farmer_id_card_pdf(selected_row):
-
-     farmer_id_value = selected_row.get("farmer_id", "")
-
-    farmer_id_value = selected_row.get("farmer_id", selected_row.get("Farmer_ID", ""))
-    sig = generate_qr_signature(farmer_id_value)
-
-    verification_url = f"{APP_BASE_URL}?farmer_id={farmer_id_value}&sig={sig}"
-
-    qr = qrcode.make(verification_url)
+    # Signed verification QR.
+    signature = generate_qr_signature(farmer_id)
+    verification_url = f"{get_effective_app_base_url()}?farmer_id={farmer_id}&sig={signature}"
+    qr = qrcode.QRCode(version=None, error_correction=qrcode.constants.ERROR_CORRECT_M, box_size=8, border=2)
+    qr.add_data(verification_url)
+    qr.make(fit=True)
+    qr_image = qr.make_image(fill_color="black", back_color="white")
     qr_buffer = BytesIO()
-    qr.save(qr_buffer, format="PNG")
+    qr_image.save(qr_buffer, format="PNG")
     qr_buffer.seek(0)
 
-    # continue PDF drawing...
+    qr_size = 18 * mm
+    qr_x = card_width - qr_size - 4 * mm
+    qr_y = 4.8 * mm
+    c.setFillColorRGB(1, 1, 1)
+    c.setStrokeColorRGB(0.75, 0.75, 0.75)
+    c.roundRect(qr_x - 1, qr_y - 1, qr_size + 2, qr_size + 4.2 * mm, 2, stroke=1, fill=1)
+    c.drawImage(ImageReader(qr_buffer), qr_x, qr_y + 3.2 * mm, width=qr_size, height=qr_size, mask="auto")
+    c.setFillColorRGB(0.10, 0.36, 0.16)
+    c.setFont("Helvetica-Bold", 4.7)
+    c.drawCentredString(qr_x + qr_size / 2, qr_y + 1.3 * mm, "SCAN TO VERIFY")
 
-    qr_size = 16 * mm
-    qr_x = width - qr_size - padding
-    qr_y = 14 * mm
-
-    c.drawImage(
-        ImageReader(qr_buffer),
-        qr_x,
-        qr_y,
-        width=qr_size,
-        height=qr_size,
-        mask='auto'
-    )
-
-  # Footer / Disclaimer Section
-    footer_y = 6 * mm
-
-    c.setFillColorRGB(0.2, 0.2, 0.2)
-    c.setFont("Helvetica", 5.5)
-    c.drawString(padding, footer_y + 3 * mm, f"Issue Date: {datetime.now().strftime('%Y-%m-%d')}")
-
-    c.setFont("Helvetica-Bold", 5.5)
-    c.drawString(padding, footer_y, "Valid for AGROW program identification only")
-
-    c.setFont("Helvetica", 5)
-    c.drawString(padding, footer_y - 2.5 * mm, "Not a National ID. Subject to verification.")
-
-    c.setFont("Helvetica-Oblique", 5)
-    c.drawRightString(width - padding, footer_y + 2.5 * mm, "Issued by DataDev Limited")
-
-    sig_x1 = width - 30 * mm
-    sig_x2 = width - 8 * mm
-    sig_y = footer_y - 1 * mm
-
-    c.setStrokeColorRGB(0.4, 0.4, 0.4)
-    c.line(sig_x1, sig_y, sig_x2, sig_y)
-
-    c.setFont("Helvetica", 5)
-    c.drawCentredString((sig_x1 + sig_x2) / 2, sig_y - 3 * mm, "Authorized Officer")
+    # Footer and validation notice.
+    c.setFillColorRGB(0.10, 0.36, 0.16)
+    c.setFont("Helvetica-Bold", 5.1)
+    c.drawString(4 * mm, 10.5 * mm, "VERIFIED AGRICULTURAL PROFILE")
+    c.setFillColorRGB(0.25, 0.25, 0.25)
+    c.setFont("Helvetica", 4.5)
+    c.drawString(4 * mm, 7.8 * mm, f"Issued: {issue_date}")
+    c.drawString(4 * mm, 5.5 * mm, "Not a national identity document. Validate through the signed QR code.")
+    c.setFont("Helvetica-Oblique", 4.4)
+    c.drawString(4 * mm, 3.3 * mm, "Issued through AGROW | Powered by DataDev Limited")
 
     c.save()
     buffer.seek(0)
@@ -801,6 +876,9 @@ if "farmer_form_version" not in st.session_state:
 
 if "post_signup_redirect" not in st.session_state:
     st.session_state["post_signup_redirect"] = False
+
+if "last_created_agent_id" not in st.session_state:
+    st.session_state["last_created_agent_id"] = ""
 
 # online / offline + sync monitor
 if "db_online" not in st.session_state:
@@ -855,18 +933,25 @@ def show_auth():
 
     st.markdown(
     """
-    <div class="top-title">FEDERAL MINISTRY DIGITAL TRANSFORMATION PROPOSAL</div>
-    <div class="main-title">AGROW Nigeria Digital Field Intelligence Platform</div>
-    <div class="sub-title">National Farmer Registration, Input Distribution and Monitoring System</div>
-    <div class="small-note">Powered by DataDev Limited | Supporting World Bank AGROW Initiative</div>
+    <div class="top-title">AGROW DIGITAL AGRICULTURE PLATFORM</div>
+    <div class="main-title">AGROW — Agricultural Geographic Registration & Operations Workspace</div>
+    <div class="sub-title">Farmer Registration, Geographic Intelligence, Market Linkage and Agricultural Operations</div>
+    <div class="small-note">Powered by DataDev Limited | Built for Africa’s Agricultural Value Chain</div>
     """,
     unsafe_allow_html=True,
 )
     if st.session_state.get("post_signup_redirect", False):
-        st.success("Agent account created successfully. Please log in with the new username.")
+        created_agent_id = st.session_state.get("last_created_agent_id", "")
+        st.success(f"Agent account created successfully. Username: {created_agent_id}. Use this username and the password you created to log in.")
         st.session_state["post_signup_redirect"] = False
 
-    tab1, tab2, tab3 = st.tabs(["Login", "Signup", "Password"])
+    st.markdown("### Public Farmer Verification")
+    st.caption("Farmers, field agents and input-distribution teams can confirm an enumeration record using a Farmer ID, phone number or the QR code printed on an AGROW Farmer ID card.")
+    show_public_farmer_verification(compact=True)
+    st.divider()
+    st.markdown("### Secure Workspace Access")
+
+    tab1, tab2, tab3 = st.tabs(["Login", "Agent Signup", "Password"])
 
     with tab1:
         default_username = st.session_state.get("prefill_login_username", "")
@@ -877,8 +962,6 @@ def show_auth():
             key="login_username"
         )
 
-        if "prefill_login_username" in st.session_state:
-            del st.session_state["prefill_login_username"]
 
         login_pw = st.text_input(
             "Password",
@@ -886,14 +969,16 @@ def show_auth():
             key="login_password"
         )
 
-        if st.button("🚀 Access Portal", use_container_width=True):
-            user = fetch_user(login_user)
+        if st.button("🚀 Access Portal", width="stretch"):
+            normalized_login_user = str(login_user or "").strip().upper()
+            normalized_login_pw = str(login_pw or "").strip()
+            user = fetch_user(normalized_login_user)
 
-            if user and user["pw"] == login_pw:
+            if user and str(user["pw"]).strip() == normalized_login_pw:
                 st.session_state.logged_in = True
-                st.session_state.user_id = login_user
+                st.session_state.user_id = normalized_login_user
                 st.session_state.role = user["role"]
-                log_action(login_user, "LOGIN", "Successful login")
+                log_action(normalized_login_user, "LOGIN", "Successful login")
                 st.rerun()
             else:
                 st.error("Invalid username or password.")
@@ -916,21 +1001,22 @@ def show_auth():
         )
 
         password = st.text_input("Create Password", type="password", key="signup_password")
-        invite_code = st.text_input("Ministry Invite Code", key="signup_invite")
+        confirm_password = st.text_input("Confirm Password", type="password", key="signup_confirm_password")
+        invite_code = st.text_input("Organisation Invite Code", key="signup_invite")
 
         st.markdown("### Agent Photo Capture")
         signup_enable_camera = st.checkbox("Enable Agent Camera", key="signup_enable_camera")
         signup_photo = st.camera_input("Capture Agent Photo", key="signup_photo") if signup_enable_camera else None
 
-        preview_id = "AUTO-GENERATED"
+        state_prefix = get_state_prefix(state)
+        preview_id = generate_agent_id_db(state_prefix)
         st.info(f"Generated Agent Username: {preview_id}")
 
-        if st.button("Create Agent Account", use_container_width=True):
+        if st.button("Create Agent Account", width="stretch"):
             existing = fetch_user(preview_id)
 
-            MINISTRY_INVITE_CODE = os.getenv("MINISTRY_INVITE_CODE", "DATADEV")
-            if invite_code != MINISTRY_INVITE_CODE:
-                st.error("Invalid ministry invite code.")
+            if not invite_code_matches(invite_code):
+                st.error("Invalid organisation invite code. Confirm the local .env value and restart Streamlit.")
             elif existing:
                 st.error("Generated agent ID already exists. Please try again.")
             elif not full_name.strip():
@@ -943,14 +1029,25 @@ def show_auth():
                 st.error("A valid email address is required.")
             elif not password.strip():
                 st.error("Password is required.")
+            elif len(password.strip()) < 6:
+                st.error("Password must be at least 6 characters.")
+            elif password.strip() != confirm_password.strip():
+                st.error("Passwords do not match.")
             elif not signup_enable_camera or signup_photo is None:
                 st.error("Agent photo capture is required.")
             else:
-                agent_id = generate_agent_id_db(state)
-                insert_user(agent_id, password, "agent", full_name, phone, nin, state, lga_coverage, email)
+                agent_id = preview_id
+                clean_password = password.strip()
+                insert_user(agent_id, clean_password, "agent", full_name, phone, nin, state, lga_coverage, email)
+                saved_user = fetch_user(agent_id)
+                if not saved_user or str(saved_user["pw"]).strip() != clean_password:
+                    st.error("The account could not be verified after registration. Please try again.")
+                    st.stop()
+                save_uploaded_photo(signup_photo, str(AGENT_PHOTO_DIR), f"{agent_id}.png")
                 log_action(agent_id, "AGENT_CREATED", f"{state} / {lga_coverage}")
 
                 st.session_state["prefill_login_username"] = agent_id
+                st.session_state["last_created_agent_id"] = agent_id
                 st.session_state["post_signup_redirect"] = True
 
                 signup_keys = [
@@ -961,6 +1058,7 @@ def show_auth():
                     "signup_state",
                     "signup_lga",
                     "signup_password",
+                    "signup_confirm_password",
                     "signup_invite",
                     "signup_enable_camera",
                     "signup_photo",
@@ -980,7 +1078,7 @@ def show_auth():
         cp_new = st.text_input("New Password", type="password", key="cp_new")
         cp_confirm = st.text_input("Confirm New Password", type="password", key="cp_confirm")
 
-        if st.button("Update Password", use_container_width=True):
+        if st.button("Update Password", width="stretch"):
             user = fetch_user(cp_user)
             if not user:
                 st.error("User does not exist.")
@@ -1007,9 +1105,10 @@ def generate_qr_code(url):
     return buffer
 
 
-def show_public_farmer_verification():
-    st.markdown("### 🔎 Farmer Verification Portal")
-    st.info("Scan QR code or search using Farmer ID / Phone Number.")
+def show_public_farmer_verification(compact=False, key_prefix="public"):
+    if not compact:
+        st.markdown("### 🔎 Farmer Verification Portal")
+    st.info("Scan an AGROW Farmer ID QR code or search using Farmer ID / Phone Number.")
 
     query_params = st.query_params
     farmer_id_lookup = query_params.get("farmer_id", "")
@@ -1028,22 +1127,25 @@ def show_public_farmer_verification():
             farmer_id_lookup = st.text_input(
                 "Enter Farmer ID",
                 placeholder="e.g. AG-20260416074143",
-                key="public_farmer_id_lookup",
+                key=f"{key_prefix}_farmer_id_lookup",
             )
 
         with col2:
             phone_lookup = st.text_input(
                 "Enter Phone Number",
                 placeholder="e.g. 08123456789",
-                key="public_phone_lookup",
+                key=f"{key_prefix}_phone_lookup",
             )
 
-        search_clicked = st.button(
-            "Search Farmer Record",
-            key="public_farmer_search",
-            use_container_width=True,
-        )
-
+        search_col, clear_col = st.columns([4, 1])
+        with search_col:
+            search_clicked = st.button("🔎 Search Farmer Record", key=f"{key_prefix}_farmer_search", width="stretch", type="primary")
+        with clear_col:
+            clear_clicked = st.button("Clear", key=f"{key_prefix}_farmer_clear", width="stretch")
+        if clear_clicked:
+            st.session_state.pop(f"{key_prefix}_farmer_id_lookup", None)
+            st.session_state.pop(f"{key_prefix}_phone_lookup", None)
+            st.rerun()
         if not search_clicked:
             return
 
@@ -1072,6 +1174,10 @@ def show_public_farmer_verification():
 
     if record.empty:
         st.error("❌ INVALID FARMER RECORD")
+        st.caption(
+            "The QR signature is valid, but this Farmer ID is not present in the active database. "
+            "This commonly occurs when a farmer was registered in an older local/temporary database before PostgreSQL persistence was enabled."
+        )
         return
 
     farmer = record.iloc[0]
@@ -1107,9 +1213,9 @@ def show_public_farmer_verification():
     st.download_button(
         label="⬇️ Download Farmer ID Card",
         data=pdf_file.getvalue(),
-        file_name=f"{farmer.get('farmer_id', 'farmer')}_ID_Card.pdf",
+        file_name=f"{safe_filename(farmer.get('farmer_full_name', 'Farmer'))}_{safe_filename(farmer.get('farmer_id', 'farmer'))}_ID_Card.pdf",
         mime="application/pdf",
-        use_container_width=True,
+        width="stretch",
     )
 
 # =========================================================
@@ -1117,8 +1223,6 @@ def show_public_farmer_verification():
 # =========================================================
 if not st.session_state.logged_in:
     show_auth()
-    st.divider()
-    show_public_farmer_verification()
 
 else:
     user_id = st.session_state.user_id
@@ -1196,7 +1300,7 @@ else:
         st.sidebar.write(f"**Coverage State:** {normalize_state_name(user_meta.get('state', '-'))}")
         st.sidebar.write(f"**Coverage LGA:** {user_meta.get('lga_coverage', '-')}")
 
-    if st.sidebar.button("Logout", use_container_width=True):
+    if st.sidebar.button("Logout", width="stretch"):
         log_action(user_id, "LOGOUT", "User logged out")
         st.session_state.logged_in = False
         st.session_state.user_id = None
@@ -1208,7 +1312,7 @@ else:
         new_pw = st.text_input("New Password", type="password", key="side_new_pw")
         confirm_pw = st.text_input("Confirm New Password", type="password", key="side_confirm_pw")
 
-        if st.button("Save New Password", use_container_width=True):
+        if st.button("Save New Password", width="stretch"):
             user = fetch_user(user_id)
             if not user or user["pw"] != old_pw:
                 st.error("Current password is incorrect.")
@@ -1235,13 +1339,13 @@ else:
         """
         <div style="text-align:center; margin-bottom:18px; padding: 0 10px;">
             <div style="font-size:clamp(22px, 4vw, 32px); font-weight:900; color:#004B87; line-height:1.2;">
-                AGROW Nigeria Digital Field Intelligence Platform
+                AGROW — Agricultural Geographic Registration & Operations Workspace
             </div>
             <div style="font-size:clamp(13px, 2.2vw, 16px); font-weight:700; color:#1B5E20; margin-top:6px; line-height:1.4;">
-                Ministry Deployment Prototype for National Farmer Registration and Input Monitoring
+                A unified workspace for farmer identity, geospatial registration, field operations, market access and agricultural intelligence
             </div>
             <div style="font-size:clamp(11px, 1.8vw, 14px); color:#555; margin-top:6px; line-height:1.5;">
-                Supporting beneficiary verification, field intelligence capture, geospatial tracking and agent coordination
+                Connecting verified farmer records, geographic field intelligence, input distribution and accountable agricultural operations
             </div>
         </div>
         """,
@@ -1249,7 +1353,7 @@ else:
     )
 
     st.info("⚠️ Demo Mode: Sample data displayed for presentation purposes")
-    st.caption("Powered by DataDev Limited | National Digital Agriculture Prototype")
+    st.caption("Powered by DataDev Limited | Agricultural Value-Chain Infrastructure")
 
     if is_db_available():
         st.success("🟢 ONLINE MODE: Data syncing to central database")
@@ -1257,7 +1361,7 @@ else:
         st.warning("🟡 OFFLINE MODE: Data stored locally and will sync later")
 
     if role == "admin":
-        st.markdown("### 🌐 Live Prototype Access")
+        st.markdown("### 🌐 AGROW Platform Access")
 
         qr_img = generate_qr_code(APP_BASE_URL)
 
@@ -1267,13 +1371,13 @@ else:
             st.image(qr_img, width=150)
 
         with qr_col2:
-            st.caption("Scan this QR code to open the AGROW platform on another device.")
+            st.caption("Scan this platform QR to open the public verification and secure workspace landing page on another device.")
             st.download_button(
                 label="⬇️ Download QR Code",
                 data=qr_img.getvalue(),
                 file_name="agrow_platform_qr.png",
                 mime="image/png",
-                use_container_width=False,
+                width="content",
             )
 
         st.divider()
@@ -1299,8 +1403,8 @@ else:
     # =========================================================
     # TAB LAYOUT
     # =========================================================
-    tab_dashboard, tab_farmer_registration, tab_distribution, tab_analytics = st.tabs(
-        ["📊 Dashboard", "📝 Farmer Registration", "📦 Distribution", "📈 Analytics"]
+    tab_dashboard, tab_farmer_registration, tab_distribution, tab_verification, tab_analytics = st.tabs(
+        ["📊 Dashboard", "📝 Farmer Registration", "📦 Distribution", "🔎 Farmer Verification", "📈 Analytics"]
     )
 
     # =========================================================
@@ -1326,7 +1430,7 @@ else:
         st.markdown("### National Performance Overview")
 
         row1 = st.columns(4)
-        row1[0].metric("Beneficiaries", total_beneficiaries)
+        row1[0].metric("Registered Farmers", total_beneficiaries)
         row1[1].metric("Verified NIN", total_verified)
         row1[2].metric("Land Coverage (Ha)", f"{total_land:.1f}")
         row1[3].metric("Verification Rate", f"{verification_rate}%")
@@ -1343,7 +1447,7 @@ else:
             a3, a4 = st.columns(2)
 
             a1.info(f"Registered Agents: {total_agents}")
-            a2.info("Target Beneficiaries: 1,000,000")
+            a2.info("Target Registered Farmers: 1,000,000")
             a3.info("Target States Covered: 36 + FCT")
             a4.info("Target Verification Rate: 95%")
         else:
@@ -1371,7 +1475,7 @@ else:
                 state_counts = df["state"].value_counts().reset_index()
                 state_counts.columns = ["State", "Count"]
                 state_counts["State"] = state_counts["State"].apply(normalize_state_name)
-                st.plotly_chart(px.bar(state_counts, x="State", y="Count"), use_container_width=True)
+                st.plotly_chart(px.bar(state_counts, x="State", y="Count"), width="stretch")
             else:
                 st.info("No state data")
 
@@ -1380,7 +1484,7 @@ else:
             if not df.empty:
                 agent_counts = df["agent_id"].value_counts().reset_index()
                 agent_counts.columns = ["Agent_ID", "Count"]
-                st.plotly_chart(px.bar(agent_counts, x="Agent_ID", y="Count"), use_container_width=True)
+                st.plotly_chart(px.bar(agent_counts, x="Agent_ID", y="Count"), width="stretch")
             else:
                 st.info("No agent data")
 
@@ -1395,7 +1499,7 @@ else:
                 nin_counts.columns = ["NIN_Status", "Count"]
                 st.plotly_chart(
                     px.pie(nin_counts, names="NIN_Status", values="Count", hole=0.45),
-                    use_container_width=True,
+                    width="stretch",
                 )
             else:
                 st.info("No NIN data")
@@ -1407,7 +1511,7 @@ else:
                 photo_counts.columns = ["Photo_Status", "Count"]
                 st.plotly_chart(
                     px.pie(photo_counts, names="Photo_Status", values="Count", hole=0.45),
-                    use_container_width=True,
+                    width="stretch",
                 )
             else:
                 st.info("No photo data")
@@ -1419,7 +1523,7 @@ else:
             input_counts = df["input_distributed"].fillna("").str.split(", ").explode()
             input_counts = input_counts[input_counts != ""].value_counts().reset_index()
             input_counts.columns = ["Input_Type", "Count"]
-            st.plotly_chart(px.bar(input_counts, x="Input_Type", y="Count"), use_container_width=True)
+            st.plotly_chart(px.bar(input_counts, x="Input_Type", y="Count"), width="stretch")
         else:
             st.info("No input data")
 
@@ -1428,7 +1532,7 @@ else:
         st.subheader("Recent Farmer Registrations")
         if not df.empty:
             recent_df = df.sort_values(by="registration_date", ascending=False).head(10)
-            st.dataframe(recent_df, use_container_width=True)
+            st.dataframe(recent_df, width="stretch")
         else:
             st.info("No farmer records yet")
 
@@ -1446,7 +1550,7 @@ else:
         q2.metric("Synced", synced_count)
         q3.metric("Failed", failed_count)
 
-        if st.button("Sync Pending Records", use_container_width=True):
+        if st.button("Sync Pending Records", width="stretch"):
             synced, failed = sync_offline_queue()
             st.success(f"{synced} synced")
             if failed:
@@ -1454,14 +1558,15 @@ else:
             st.rerun()
 
         if not queue_df.empty:
-            st.dataframe(queue_df, use_container_width=True)
+            st.dataframe(queue_df, width="stretch")
         else:
             st.info("No queue records")
 
     # =========================================================
     # TAB 2: REGISTER FARMER
     # =========================================================
-    with tab_farmer_registration:
+    @st.fragment
+    def render_farmer_registration():
         st.info("Complete each section carefully and click 'Sync Secure Record' only after all required information has been entered.")
 
         if "registration_success" in st.session_state:
@@ -1488,95 +1593,160 @@ else:
             "Extension Support",
         ]
 
-        st.markdown("### Section 4: Support Delivered")
-        input_list = st.multiselect("Inputs Distributed", input_options, key=f"input_list_{form_v}")
-        quantity_units = len(input_list)
-        st.markdown(f"### Total Input Units Selected: {quantity_units}")
+        # Every successful submission increments this version. Streamlit then
+        # creates a fresh set of widget keys, giving the agent a clean form.
+        form_v = st.session_state.get("farmer_form_version", 0)
 
-        st.markdown("---")
-        st.markdown("### Section 7: Farmer Photo Capture")
-        enable_camera_main = st.checkbox("Enable Camera", key=f"enable_camera_main_{form_v}")
-
-        photo_capture = None
-        if enable_camera_main:
-            photo_capture = st.camera_input("Capture Farmer Photo", key=f"photo_capture_{form_v}")
-
-        st.markdown("---")
-
-        with st.form("field_registration_form", clear_on_submit=False):
-            st.markdown("### Section 1: Farmer Bio-Data")
-            farmer_full_name = st.text_input("Farmer Full Name", key=f"farmer_full_name_{form_v}")
+        st.markdown("### Section 1: Farmer Identity")
+        farmer_full_name = st.text_input("Farmer Full Name", key=f"farmer_full_name_{form_v}")
+        identity_col1, identity_col2 = st.columns(2)
+        with identity_col1:
             gender = st.selectbox("Gender", ["Male", "Female"], key=f"gender_{form_v}")
+        with identity_col2:
             dob = st.date_input("Date of Birth", key=f"dob_{form_v}")
+
+        st.markdown("---")
+        st.markdown("### Section 2: Contact Information")
+        contact_col1, contact_col2 = st.columns(2)
+        with contact_col1:
             phone_number = st.text_input("Phone Number", max_chars=11, key=f"phone_number_{form_v}")
+        with contact_col2:
             alternate_phone = st.text_input(
                 "Alternate Phone Number",
                 max_chars=11,
                 placeholder="Optional 11-digit phone number",
                 key=f"alternate_phone_{form_v}",
             )
-            email_address = st.text_input("Email Address", key=f"email_address_{form_v}")
-            nin = st.text_input("NIN", max_chars=11, key=f"nin_{form_v}")
+        email_address = st.text_input("Email Address", key=f"email_address_{form_v}")
 
-            st.markdown("---")
-            st.markdown("### Section 2: Coverage and Location")
+        st.markdown("---")
+        st.markdown("### Section 3: Coverage and Location")
+        if role == "admin":
+            farmer_state = st.selectbox("State", state_options, key=f"farmer_state_{form_v}")
+        else:
+            farmer_state = user_meta.get("state", "")
+            st.text_input("State", value=farmer_state, disabled=True, key=f"farmer_state_display_{form_v}")
 
-            if role == "admin":
-                farmer_state = st.selectbox("State", state_options, key=f"farmer_state_{form_v}")
-            else:
-                farmer_state = user_meta.get("state", "")
-
-            lga_list = NIGERIA_LGA_MAP.get(farmer_state, [])
+        lga_list = NIGERIA_LGA_MAP.get(farmer_state, [])
+        if role == "admin":
             farmer_lga = st.selectbox("LGA", lga_list if lga_list else ["N/A"], key=f"farmer_lga_{form_v}")
+        else:
+            assigned_lga = user_meta.get("lga_coverage", "")
+            farmer_lga = assigned_lga if assigned_lga in lga_list or assigned_lga else (lga_list[0] if lga_list else "N/A")
+            st.text_input("LGA", value=farmer_lga, disabled=True, key=f"farmer_lga_display_{form_v}")
+
+        location_col1, location_col2 = st.columns(2)
+        with location_col1:
             ward = st.text_input("Ward", key=f"ward_{form_v}")
+        with location_col2:
             community = st.text_input("Community / Village", key=f"community_{form_v}")
-            residential_address = st.text_area("Residential Address", key=f"residential_address_{form_v}")
+        residential_address = st.text_area("Residential Address", key=f"residential_address_{form_v}")
 
-            st.markdown("---")
-            st.markdown("### Section 3: Farm Details")
-
+        st.markdown("---")
+        st.markdown("### Section 4: Farm Profile")
+        crop_col1, crop_col2 = st.columns(2)
+        with crop_col1:
             primary_crop = st.selectbox(
                 "Primary Crop",
                 ["Rice", "Maize", "Cassava", "Sorghum", "Soybean", "Groundnut", "Millet"],
                 key=f"primary_crop_{form_v}",
             )
-
+        with crop_col2:
             secondary_crop = st.selectbox(
                 "Secondary Crop",
                 ["None", "Rice", "Maize", "Cassava", "Sorghum", "Soybean", "Groundnut", "Millet"],
                 key=f"secondary_crop_{form_v}",
             )
+        farm_size = st.number_input("Farm Size (Hectares)", min_value=0.0, step=0.1, key=f"farm_size_{form_v}")
 
-            farm_size = st.number_input("Farm Size (Hectares)", min_value=0.0, step=0.1, key=f"farm_size_{form_v}")
+        st.markdown("---")
+        st.markdown("### Section 5: Support Delivered")
+        input_list = st.multiselect("Inputs Distributed", input_options, key=f"input_list_{form_v}")
+        quantity_units = len(input_list)
+        st.caption(f"Total input types selected: {quantity_units}")
 
-            st.markdown("---")
-            st.markdown("### Section 5: Verification")
-
+        st.markdown("---")
+        st.markdown("### Section 6: NIN Verification")
+        nin_col1, nin_col2 = st.columns(2)
+        with nin_col1:
+            nin = st.text_input("NIN", max_chars=11, key=f"nin_{form_v}")
+        with nin_col2:
             nin_status = st.selectbox(
                 "NIN Verification Status",
                 ["Verified", "Pending", "Rejected"],
                 key=f"nin_status_{form_v}",
             )
 
+        st.markdown("---")
+        st.markdown("### Section 7: Identification Document")
+        id_col1, id_col2 = st.columns(2)
+        with id_col1:
             id_type = st.selectbox(
                 "ID Type",
                 ["NIN Slip", "Voter Card", "Driver's License", "National ID Card", "Other"],
                 key=f"id_type_{form_v}",
             )
-
+        with id_col2:
             id_number = st.text_input("ID Number", max_chars=20, key=f"id_number_{form_v}")
 
-            st.markdown("---")
-            st.markdown("### Section 6: Geo-tagging and Notes")
+        st.markdown("---")
+        st.markdown("### Section 8: Automatic Farm Geo-tagging")
+        st.caption(
+            "Capture the device GPS position at the farm. The browser will request location permission the first time. "
+            "Coordinates remain editable when a field agent needs to correct a weak GPS reading."
+        )
 
-            latitude = st.number_input("Latitude", format="%.6f", key=f"latitude_{form_v}")
-            longitude = st.number_input("Longitude", format="%.6f", key=f"longitude_{form_v}")
-            remarks = st.text_area("Enumerator Remarks", key=f"remarks_{form_v}")
+        location = streamlit_geolocation()
+        lat_key = f"latitude_{form_v}"
+        lon_key = f"longitude_{form_v}"
+        accuracy_key = f"gps_accuracy_{form_v}"
 
-            st.markdown("---")
-            st.markdown("### Section 8: Submission")
+        if isinstance(location, dict):
+            detected_lat = location.get("latitude")
+            detected_lon = location.get("longitude")
+            detected_accuracy = location.get("accuracy")
+            if detected_lat is not None and detected_lon is not None:
+                st.session_state[lat_key] = float(detected_lat)
+                st.session_state[lon_key] = float(detected_lon)
+                st.session_state[accuracy_key] = detected_accuracy
+                accuracy_text = f" ±{float(detected_accuracy):.1f} m" if detected_accuracy is not None else ""
+                st.success(f"GPS captured: {float(detected_lat):.6f}, {float(detected_lon):.6f}{accuracy_text}")
+        else:
+            st.info("Tap the location button and allow GPS access before submitting this farmer record.")
 
-            submitted = st.form_submit_button("Sync Secure Record", use_container_width=True)
+        geo_col1, geo_col2 = st.columns(2)
+        with geo_col1:
+            latitude = st.number_input("Latitude", format="%.6f", key=lat_key)
+        with geo_col2:
+            longitude = st.number_input("Longitude", format="%.6f", key=lon_key)
+
+        if role == "agent" and latitude and longitude:
+            geofence_result = gps_matches_assigned_state(farmer_state, float(latitude), float(longitude))
+            if geofence_result is False:
+                st.error(f"GPS is outside the broad {normalize_state_name(farmer_state)} operating envelope.")
+            elif geofence_result is True:
+                st.success(f"GPS is consistent with the assigned state: {normalize_state_name(farmer_state)}.")
+            else:
+                st.info("State and LGA are locked to the agent assignment. Precise boundary validation requires official GIS polygons.")
+
+        st.markdown("---")
+        st.markdown("### Section 9: Farmer Photo Capture")
+        enable_camera_main = st.checkbox("Enable Camera", key=f"enable_camera_main_{form_v}")
+        photo_capture = None
+        if enable_camera_main:
+            photo_capture = st.camera_input("Capture Farmer Photo", key=f"photo_capture_{form_v}")
+
+        st.markdown("---")
+        st.markdown("### Section 10: Enumerator Remarks and Confirmation")
+        remarks = st.text_area("Enumerator Remarks", key=f"remarks_{form_v}")
+        record_confirmed = st.checkbox(
+            "I confirm that the information above has been reviewed with the farmer and is ready for submission.",
+            key=f"record_confirmed_{form_v}",
+        )
+
+        st.markdown("---")
+        st.markdown("### Section 11: Submission")
+        submitted = st.button("Sync Secure Record", width="stretch", key=f"submit_farmer_{form_v}")
 
         if submitted:
             if not farmer_full_name.strip():
@@ -1589,12 +1759,18 @@ else:
                 st.error("NIN must be exactly 11 digits.")
             elif not valid_id_number(id_number):
                 st.error("ID Number must be between 1 and 20 characters.")
-            elif not farmer_lga:
+            elif not farmer_lga or farmer_lga == "N/A":
                 st.error("LGA is required.")
             elif len(input_list) == 0:
                 st.error("Please select at least one distributed input.")
             elif photo_capture is None:
                 st.error("Farmer photo capture is required.")
+            elif latitude == 0.0 and longitude == 0.0:
+                st.error("Capture the farm GPS location before submission. Allow browser location access and try again.")
+            elif role == "agent" and gps_matches_assigned_state(farmer_state, float(latitude), float(longitude)) is False:
+                st.error("Submission blocked: GPS is outside the agent's assigned-state operating envelope.")
+            elif not record_confirmed:
+                st.error("Please confirm that the farmer's information has been reviewed before submission.")
             elif farmer_exists_today(phone_number, nin, farmer_full_name):
                 st.warning("This farmer appears to have already been registered today.")
             else:
@@ -1644,14 +1820,21 @@ else:
                 if is_db_available():
                     insert_farmer(row)
                     log_action(user_id, "FARMER_REGISTERED", farmer_id)
-                    st.session_state["registration_success"] = "✅ Farmer record saved directly to the main database."
+                    success_text = "✅ Farmer record saved directly to the main database."
                 else:
                     save_to_offline_queue(row)
                     log_action(user_id, "FARMER_QUEUED", farmer_id)
-                    st.session_state["registration_success"] = "✅ Offline Mode: farmer record saved locally and queued for sync."
+                    success_text = "✅ Offline Mode: farmer record saved locally and queued for sync."
 
-                st.session_state["farmer_form_version"] = st.session_state.get("farmer_form_version", 0) + 1
-                st.rerun()
+                # Preserve the confirmation across the rerun, while assigning a
+                # new widget-key version so the registration screen is blank.
+                st.session_state["registration_success"] = f"{success_text} Farmer ID: {farmer_id}"
+                st.session_state["farmer_form_version"] = form_v + 1
+                st.rerun(scope="app")
+
+
+    with tab_farmer_registration:
+        render_farmer_registration()
 
     # =========================================================
     # TAB 3: DISTRIBUTION
@@ -1670,7 +1853,7 @@ else:
                 values="Count",
                 hole=0.5,
             )
-            st.plotly_chart(pie_fig, use_container_width=True)
+            st.plotly_chart(pie_fig, width="stretch")
         else:
             st.info("No input distribution data available.")
 
@@ -1813,7 +1996,7 @@ else:
         ]
 
         available_screen_columns = [col for col in screen_columns if col in display_df.columns]
-        st.dataframe(display_df[available_screen_columns], use_container_width=True)
+        st.dataframe(display_df[available_screen_columns], width="stretch")
 
         st.markdown("### Farmer ID Preview")
 
@@ -1857,6 +2040,30 @@ else:
 **Crop:** {selected_row.get('primary_crop', '-')}  
 **Photo Status:** {selected_row['photo_status']}
                     """)
+
+                farmer_id_value = str(selected_row['farmer_id'])
+                verification_url = f"{get_effective_app_base_url()}?farmer_id={farmer_id_value}&sig={generate_qr_signature(farmer_id_value)}"
+                farmer_qr = generate_qr_code(verification_url)
+                farmer_qr_identity = build_farmer_qr_identity_image(selected_row, verification_url)
+                qr1, qr2 = st.columns([1, 3])
+                with qr1:
+                    st.image(farmer_qr, width=150, caption="Individual Farmer QR")
+                with qr2:
+                    st.caption("Scan during input distribution or field verification to open this farmer's authenticated enumeration record.")
+                    farmer_id_pdf = generate_farmer_id_card_pdf(
+                        selected_row=selected_row,
+                        photo_path=selected_photo_path,
+                        logo_path=get_logo_path(),
+                    )
+                    st.download_button(
+                        "Download Farmer ID Card (PDF)",
+                        data=farmer_id_pdf.getvalue(),
+                        file_name=f"{safe_filename(selected_row.get('farmer_full_name', 'Farmer'))}_{safe_filename(farmer_id_value)}_Farmer_ID_Card.pdf",
+                        mime="application/pdf",
+                        key=f"download_farmer_id_pdf_{farmer_id_value}",
+                        width="content",
+                    )
+                    st.caption(f"QR verification address: {verification_url}")
             else:
                 st.warning("Photo file path exists in record, but image file was not found on disk.")
         else:
@@ -1871,7 +2078,15 @@ else:
             table_to_excel_download(display_df, "agrow_master_registry.xlsx")       
 
     # =========================================================
-    # TAB 4: ANALYTICS
+    # TAB 4: FARMER VERIFICATION
+    # =========================================================
+    with tab_verification:
+        st.markdown("### Verify an Enumerated Farmer")
+        st.caption("Use this workspace during input distribution, field monitoring or farmer support. A valid QR scan opens the same verified record without requiring administrator access.")
+        show_public_farmer_verification(compact=True, key_prefix="workspace")
+
+    # =========================================================
+    # TAB 5: ANALYTICS
     # =========================================================
     with tab_analytics:
         c1, c2 = st.columns(2)
@@ -1882,7 +2097,7 @@ else:
                 crop_counts = df["primary_crop"].value_counts().reset_index()
                 crop_counts.columns = ["Primary_Crop", "Count"]
                 bar_fig = px.bar(crop_counts, x="Primary_Crop", y="Count")
-                st.plotly_chart(bar_fig, use_container_width=True)
+                st.plotly_chart(bar_fig, width="stretch")
             else:
                 st.info("No crop data available.")
 
@@ -1892,9 +2107,33 @@ else:
                 nin_counts = df["nin_status"].value_counts().reset_index()
                 nin_counts.columns = ["NIN_Status", "Count"]
                 status_fig = px.bar(nin_counts, x="NIN_Status", y="Count")
-                st.plotly_chart(status_fig, use_container_width=True)
+                st.plotly_chart(status_fig, width="stretch")
             else:
                 st.info("No verification data available.")
+
+        st.subheader("Geographic Farmer Clusters")
+        if not df.empty and {"state", "lga", "community", "latitude", "longitude"}.issubset(df.columns):
+            cluster_df = df.copy()
+            cluster_df["community"] = cluster_df["community"].fillna("Not specified").replace("", "Not specified")
+            cluster_summary = (
+                cluster_df.groupby(["state", "lga", "community"], dropna=False)
+                .agg(
+                    Farmers=("farmer_id", "count"),
+                    Total_Land_Ha=("farm_size", "sum"),
+                    Centre_Latitude=("latitude", "mean"),
+                    Centre_Longitude=("longitude", "mean"),
+                )
+                .reset_index()
+                .sort_values(["Farmers", "Total_Land_Ha"], ascending=False)
+            )
+            st.dataframe(cluster_summary, width="stretch")
+            valid_cluster_points = cluster_df[(cluster_df["latitude"] != 0) | (cluster_df["longitude"] != 0)]
+            if not valid_cluster_points.empty:
+                cluster_map = valid_cluster_points.rename(columns={"latitude": "lat", "longitude": "lon"})
+                st.map(cluster_map[["lat", "lon"]])
+            st.caption("Use these community clusters to plan input allocation, extension visits, monitoring routes and other farmer support.")
+        else:
+            st.info("Community cluster analysis will appear after geotagged farmer records are available.")
 
         if role == "admin":
             st.subheader("👥 Registered Agents")
@@ -1902,7 +2141,7 @@ else:
 
             if not agent_df.empty:
                 agent_df["State"] = agent_df["State"].apply(normalize_state_name)
-                st.dataframe(agent_df, use_container_width=True)
+                st.dataframe(agent_df, width="stretch")
 
                 a1, a2 = st.columns(2)
                 with a1:
@@ -1913,6 +2152,6 @@ else:
                 st.info("No registered agents yet.")
 
     st.markdown(
-        '<div class="footer">© DataDev Limited | AGROW Field Intelligence Suite v4.0 | Ministry Deployment Prototype</div>',
+        '<div class="footer">© DataDev Limited | AGROW — Agricultural Geographic Registration & Operations Workspace v4.2</div>',
         unsafe_allow_html=True,
     )

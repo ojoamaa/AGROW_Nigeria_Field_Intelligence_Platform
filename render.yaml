@@ -1,0 +1,25 @@
+services:
+  - type: web
+    name: agrow-nigeria-field-intelligence-platform
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: streamlit run app.py --server.address 0.0.0.0 --server.port $PORT
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: agrow-postgres
+          property: connectionString
+      - key: APP_BASE_URL
+        value: https://agrow-nigeria-field-intelligence-platform.onrender.com
+      - key: QR_SECRET_KEY
+        sync: false
+      - key: MINISTRY_INVITE_CODE
+        value: DATADEV
+      - key: AGROW_ADMIN_PASSWORD
+        sync: false
+      - key: AGROW_ENABLE_DEMO_DATA
+        value: "false"
+
+databases:
+  - name: agrow-postgres
+    plan: free

@@ -1,3 +1,21 @@
+# AGROW Changelog
+
+## v4.3.1 — MarketLink Seller Contact
+- Added WhatsApp and WhatsApp Web seller contact options.
+- Added direct call link for mobile users.
+- Added farmer profile and signed verification access from listings.
+- Added farm map link when farmer GPS coordinates are available.
+- Expanded buyer enquiry with organisation and preferred delivery date without a schema migration.
+
+
+## v4.3 MarketLink Pilot
+- Added universal produce marketplace tied to verified AGROW Farmer IDs.
+- Added agricultural input marketplace and supplier listings.
+- Added public produce/input discovery and direct seller contact.
+- Added signed farmer verification link from market listings.
+- Added buyer enquiry capture and listing status management.
+- Added live listing-derived market price board.
+- Added PostgreSQL/SQLite MarketLink tables without changing the v4.2 farmer identity schema.
 # Stage 8.1 — Platform Brand Alignment
 - Repositioned AGROW as Agricultural Geographic Registration & Operations Workspace, independent of any single project or donor.
 - Removed World Bank/project-prototype language from the active application.

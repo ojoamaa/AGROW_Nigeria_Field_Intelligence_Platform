@@ -60,6 +60,28 @@ def init_db():
             id {id_column}, username TEXT, action TEXT, details TEXT, timestamp TEXT
         )
         """))
+        conn.execute(text(f"""
+        CREATE TABLE IF NOT EXISTS market_listings (
+            id {id_column}, farmer_id TEXT NOT NULL, commodity TEXT NOT NULL, product TEXT NOT NULL,
+            quantity REAL NOT NULL, available_quantity REAL NOT NULL, unit TEXT NOT NULL, price REAL NOT NULL,
+            ready_date TEXT, state TEXT, lga TEXT, community TEXT, description TEXT,
+            status TEXT DEFAULT 'AVAILABLE', created_by TEXT, created_at TEXT, updated_at TEXT
+        )
+        """))
+        conn.execute(text(f"""
+        CREATE TABLE IF NOT EXISTS input_products (
+            id {id_column}, supplier_name TEXT NOT NULL, supplier_phone TEXT, category TEXT NOT NULL,
+            product_name TEXT NOT NULL, applicable_commodities TEXT, quantity REAL, unit TEXT, price REAL,
+            state TEXT, lga TEXT, description TEXT, status TEXT DEFAULT 'AVAILABLE',
+            created_by TEXT, created_at TEXT, updated_at TEXT
+        )
+        """))
+        conn.execute(text(f"""
+        CREATE TABLE IF NOT EXISTS market_enquiries (
+            id {id_column}, listing_id BIGINT NOT NULL, buyer_name TEXT NOT NULL, buyer_phone TEXT NOT NULL,
+            quantity_requested REAL, message TEXT, status TEXT DEFAULT 'NEW', created_at TEXT
+        )
+        """))
         existing = conn.execute(text("SELECT id FROM users WHERE UPPER(id)='ADMIN'")).first()
         if not existing:
             conn.execute(text("""

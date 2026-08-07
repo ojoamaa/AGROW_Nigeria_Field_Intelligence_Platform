@@ -17,6 +17,7 @@ from reportlab.pdfgen import canvas
 from reportlab.lib.utils import ImageReader
 from PIL import Image, ImageDraw, ImageFont
 import re
+from urllib.parse import quote
 
 from nigeria_lga_data import NIGERIA_LGA_MAP
 from core.db import get_connection, init_db, get_engine, DB_BACKEND
@@ -37,6 +38,16 @@ from services.user_service import (
     update_user_password,
     fetch_all_agents,
     generate_agent_id_db,
+)
+from services.market_service import (
+    create_market_listing,
+    fetch_market_listings,
+    update_listing_status,
+    create_input_product,
+    fetch_input_products,
+    update_input_status,
+    create_market_enquiry,
+    fetch_market_enquiries,
 )
 
 load_dotenv()
@@ -601,14 +612,61 @@ def normalize_state_name(state_name: str) -> str:
         return "Federal Capital Territory"
     return state_name
 
+FARMER_PHOTO_DIR = os.path.join("uploads", "farmers")
+
+
 def save_uploaded_photo(photo_file, folder: str, filename: str) -> str:
+    """Save an uploaded/camera image and return a portable project-relative path.
+
+    AGROW stores the relative path in the farmer record rather than a Windows
+    absolute path. This keeps the same database record usable locally and on
+    Render. The write is verified before the farmer record is committed.
+    """
     os.makedirs(folder, exist_ok=True)
-    file_path = os.path.join(folder, filename)
+    file_path = os.path.normpath(os.path.join(folder, filename))
 
+    photo_bytes = photo_file.getvalue() if hasattr(photo_file, "getvalue") else photo_file.getbuffer()
     with open(file_path, "wb") as f:
-        f.write(photo_file.getbuffer())
+        f.write(photo_bytes)
 
-    return file_path
+    if not os.path.isfile(file_path) or os.path.getsize(file_path) == 0:
+        raise IOError(f"Farmer photo could not be saved correctly: {file_path}")
+
+    return file_path.replace("\\", "/")
+
+
+def resolve_farmer_photo_path(photo_path="", farmer_id="") -> str:
+    """Resolve farmer photos across local Windows and Render/Linux deployments.
+
+    Older records may contain a path created on another machine. We therefore
+    try the stored path first, then the current uploads/farmers directory using
+    both the stored basename and the Farmer ID. No database mutation is needed.
+    """
+    raw_path = str(photo_path or "").strip()
+    farmer_id = str(farmer_id or "").strip()
+
+    candidates = []
+    if raw_path and raw_path.lower() != "nan":
+        candidates.append(raw_path)
+        candidates.append(os.path.normpath(raw_path))
+        basename = os.path.basename(raw_path.replace("\\", "/"))
+        if basename:
+            candidates.append(os.path.join(FARMER_PHOTO_DIR, basename))
+
+    if farmer_id:
+        for ext in (".jpg", ".jpeg", ".png", ".webp"):
+            candidates.append(os.path.join(FARMER_PHOTO_DIR, f"{farmer_id}{ext}"))
+
+    seen = set()
+    for candidate in candidates:
+        normalized = os.path.normpath(str(candidate))
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        if os.path.isfile(normalized) and os.path.getsize(normalized) > 0:
+            return normalized
+
+    return ""
 
 def get_state_prefix(state_name: str) -> str:
     special_map = {
@@ -898,6 +956,454 @@ if "auto_sync_ran" not in st.session_state:
 # =========================================================
 # 8. AUTH SCREEN
 # =========================================================
+# MARKETLINK — UNIVERSAL AGRICULTURAL MARKETPLACE
+# =========================================================
+MARKET_COMMODITIES = [
+    "Poultry", "Maize", "Rice", "Soybean", "Cassava", "Yam", "Sorghum",
+    "Millet", "Groundnut", "Cowpea", "Wheat", "Tomato", "Pepper", "Onion",
+    "Vegetables", "Fish", "Cattle", "Goat", "Sheep", "Pig", "Eggs", "Other",
+]
+
+MARKET_UNITS = [
+    "kg", "tonne", "bag", "crate", "basket", "bird", "tray", "litre",
+    "bundle", "tuber", "head", "unit",
+]
+
+INPUT_CATEGORIES = [
+    "Seeds & Planting Materials", "Fertilizer", "Agrochemicals", "Animal Feed",
+    "Veterinary", "Farm Machinery", "Irrigation", "Storage", "Packaging", "Other",
+]
+
+
+def _phone_for_whatsapp(phone: str) -> str:
+    digits = re.sub(r"\D", "", str(phone or ""))
+    if digits.startswith("0") and len(digits) == 11:
+        return "234" + digits[1:]
+    return digits
+
+
+def _money(value) -> str:
+    try:
+        return f"₦{float(value):,.2f}"
+    except Exception:
+        return "-"
+
+
+def _seller_message(item) -> str:
+    product = str(item.get("product") or "produce")
+    commodity = str(item.get("commodity") or "")
+    farmer = str(item.get("farmer_full_name") or "farmer")
+    quantity = float(item.get("available_quantity") or 0)
+    unit = str(item.get("unit") or "unit")
+    return (
+        f"Hello {farmer}, I found your {product} listing on AGROW MarketLink. "
+        f"Commodity: {commodity}. Available quantity: {quantity:g} {unit}. "
+        "Please confirm current availability, price and delivery/collection options. Thank you."
+    )
+
+
+def _render_seller_contact_panel(item, key_prefix: str) -> None:
+    """Render robust seller-contact options without changing farmer registry data."""
+    phone = str(item.get("phone_number") or "").strip()
+    wa_phone = _phone_for_whatsapp(phone)
+    farmer_id = str(item.get("farmer_id") or "").strip()
+    message = quote(_seller_message(item), safe="")
+
+    if wa_phone:
+        c1, c2 = st.columns(2)
+        c1.link_button(
+            "💬 WhatsApp",
+            f"https://wa.me/{wa_phone}?text={message}",
+            width="stretch",
+        )
+        c2.link_button(
+            "🖥️ WhatsApp Web",
+            f"https://web.whatsapp.com/send?phone={wa_phone}&text={message}",
+            width="stretch",
+        )
+
+    if phone:
+        safe_tel = "+" + wa_phone if wa_phone else re.sub(r"[^0-9+]", "", phone)
+        st.markdown(
+            f'<a href="tel:{safe_tel}" style="display:block;text-align:center;padding:0.55rem 0.8rem;'
+            'border:1px solid #d0d7de;border-radius:0.5rem;text-decoration:none;font-weight:600;'
+            'margin:0.25rem 0;">📞 Call Seller</a>',
+            unsafe_allow_html=True,
+        )
+        st.caption(f"Seller phone: {phone}")
+
+    latitude = item.get("latitude")
+    longitude = item.get("longitude")
+    try:
+        lat = float(latitude)
+        lon = float(longitude)
+    except (TypeError, ValueError):
+        lat = lon = 0.0
+    if abs(lat) > 0.000001 or abs(lon) > 0.000001:
+        st.link_button(
+            "📍 View Farm Location",
+            f"https://www.google.com/maps/search/?api=1&query={lat},{lon}",
+            width="stretch",
+        )
+
+    with st.expander("👨‍🌾 View Farmer Profile"):
+        pc1, pc2 = st.columns([1, 2])
+        photo_path = resolve_farmer_photo_path(item.get("photo_path", ""), farmer_id)
+        if photo_path:
+            pc1.image(photo_path, width=180)
+        else:
+            pc1.info("Farmer photo not available on this server.")
+        verified = str(item.get("nin_status") or "").lower() == "verified"
+        pc2.markdown(f"**{item.get('farmer_full_name') or '-'}**")
+        pc2.write(f"Farmer ID: **{farmer_id or '-'}**")
+        pc2.write(f"Verification: **{'Verified' if verified else 'Registered'}**")
+        pc2.write(f"Primary crop: **{item.get('primary_crop') or '-'}**")
+        pc2.write(
+            f"Location: **{item.get('community') or '-'}, {item.get('lga') or '-'}, "
+            f"{normalize_state_name(item.get('state') or '-')}**"
+        )
+        if farmer_id:
+            verification_url = (
+                f"{get_effective_app_base_url()}?farmer_id={farmer_id}"
+                f"&sig={generate_qr_signature(farmer_id)}"
+            )
+            pc2.link_button("✅ Open Verified Farmer Record", verification_url, width="stretch")
+
+
+def render_public_marketlink():
+    """Public MarketLink browser for consumers, buyers and input discovery."""
+    st.markdown("### 🛒 AGROW MarketLink")
+    st.caption(
+        "Discover produce from verified AGROW farmers and agricultural inputs from listed suppliers. "
+        "Poultry is the first live demonstration; the same marketplace supports every agricultural commodity."
+    )
+
+    produce_tab, inputs_tab, prices_tab = st.tabs(
+        ["🌾 Buy Produce", "🧰 Agricultural Inputs", "📊 Market Price Board"]
+    )
+
+    with produce_tab:
+        listings = fetch_market_listings(status="AVAILABLE")
+        if listings.empty:
+            st.info("No produce listings are available yet. Verified farmer listings will appear here.")
+        else:
+            filter1, filter2, filter3 = st.columns(3)
+            commodity_options = ["All"] + sorted(listings["commodity"].dropna().unique().tolist())
+            state_options = ["All"] + sorted(listings["state"].dropna().unique().tolist())
+            selected_commodity = filter1.selectbox("Commodity", commodity_options, key="public_market_commodity")
+            selected_state = filter2.selectbox("State", state_options, key="public_market_state")
+            query = filter3.text_input("Search product/location", key="public_market_search")
+
+            shown = listings.copy()
+            if selected_commodity != "All":
+                shown = shown[shown["commodity"] == selected_commodity]
+            if selected_state != "All":
+                shown = shown[shown["state"] == selected_state]
+            if query.strip():
+                q = query.strip().lower()
+                mask = (
+                    shown["product"].fillna("").str.lower().str.contains(q, regex=False)
+                    | shown["community"].fillna("").str.lower().str.contains(q, regex=False)
+                    | shown["lga"].fillna("").str.lower().str.contains(q, regex=False)
+                )
+                shown = shown[mask]
+
+            st.caption(f"{len(shown)} available listing(s)")
+            for _, item in shown.head(30).iterrows():
+                with st.container(border=True):
+                    c1, c2 = st.columns([3, 1])
+                    verified = str(item.get("nin_status", "")).lower() == "verified"
+                    badge = "✅ Verified Farmer" if verified else "Registered Farmer"
+                    c1.markdown(f"#### {item.get('product', '-')}")
+                    c1.caption(f"{badge} · {item.get('farmer_full_name', '-')}")
+                    c1.write(
+                        f"**{item.get('commodity', '-')}** · {float(item.get('available_quantity') or 0):g} "
+                        f"{item.get('unit', '')} available · **{_money(item.get('price'))} / {item.get('unit', '')}**"
+                    )
+                    c1.write(
+                        f"📍 {item.get('community') or '-'}, {item.get('lga') or '-'}, "
+                        f"{normalize_state_name(item.get('state') or '-')}"
+                    )
+                    if item.get("ready_date"):
+                        c1.caption(f"Ready / harvest date: {item.get('ready_date')}")
+                    if item.get("description"):
+                        c1.caption(str(item.get("description")))
+
+                    farmer_id = str(item.get("farmer_id") or "")
+                    if farmer_id:
+                        verification_url = (
+                            f"{get_effective_app_base_url()}?farmer_id={farmer_id}"
+                            f"&sig={generate_qr_signature(farmer_id)}"
+                        )
+                        c2.link_button("✅ Verify Farmer", verification_url, width="stretch")
+                    c2.caption(f"Farmer ID: {farmer_id or '-'}")
+
+                    with st.expander("📞 Contact Seller", expanded=False):
+                        _render_seller_contact_panel(item, f"seller_{int(item['id'])}")
+
+                    with st.expander("📨 Request Quote / Send Buyer Enquiry"):
+                        with st.form(f"public_enquiry_{int(item['id'])}"):
+                            buyer_name = st.text_input("Your name")
+                            buyer_phone = st.text_input("Phone number")
+                            buyer_org = st.text_input("Organisation / Business (optional)")
+                            qty = st.number_input(
+                                f"Quantity required ({item.get('unit', 'unit')})",
+                                min_value=0.0,
+                                step=1.0,
+                            )
+                            preferred_date = st.date_input("Preferred delivery / collection date")
+                            message = st.text_area("Message / delivery requirement")
+                            if st.form_submit_button("Send Enquiry", use_container_width=True):
+                                if not buyer_name.strip() or not buyer_phone.strip():
+                                    st.error("Name and phone number are required.")
+                                elif qty <= 0:
+                                    st.error("Enter the quantity required.")
+                                else:
+                                    enquiry_message = (
+                                        f"Organisation: {buyer_org.strip() or '-'} | "
+                                        f"Preferred date: {preferred_date} | {message.strip()}"
+                                    )
+                                    create_market_enquiry(
+                                        int(item["id"]), buyer_name.strip(), buyer_phone.strip(), qty, enquiry_message
+                                    )
+                                    st.success("Enquiry recorded in AGROW. Use Contact Seller if you also want to call or message the farmer directly.")
+
+    with inputs_tab:
+        products = fetch_input_products(status="AVAILABLE")
+        if products.empty:
+            st.info("No agricultural input listings are available yet.")
+        else:
+            f1, f2 = st.columns(2)
+            categories = ["All"] + sorted(products["category"].dropna().unique().tolist())
+            category = f1.selectbox("Input category", categories, key="public_input_category")
+            input_query = f2.text_input("Search product / commodity", key="public_input_search")
+            shown_inputs = products.copy()
+            if category != "All":
+                shown_inputs = shown_inputs[shown_inputs["category"] == category]
+            if input_query.strip():
+                q = input_query.strip().lower()
+                shown_inputs = shown_inputs[
+                    shown_inputs["product_name"].fillna("").str.lower().str.contains(q, regex=False)
+                    | shown_inputs["applicable_commodities"].fillna("").str.lower().str.contains(q, regex=False)
+                ]
+            for _, item in shown_inputs.head(30).iterrows():
+                with st.container(border=True):
+                    a, b = st.columns([3, 1])
+                    a.markdown(f"#### {item.get('product_name', '-')}")
+                    a.caption(f"{item.get('category', '-')} · Supplier: {item.get('supplier_name', '-')}")
+                    a.write(
+                        f"**{_money(item.get('price'))} / {item.get('unit', '')}** · "
+                        f"{float(item.get('quantity') or 0):g} {item.get('unit', '')} listed"
+                    )
+                    a.write(f"For: {item.get('applicable_commodities') or 'Multiple commodities'}")
+                    a.caption(f"📍 {item.get('lga') or '-'}, {normalize_state_name(item.get('state') or '-')}")
+                    if item.get("description"):
+                        a.caption(str(item.get("description")))
+                    phone = str(item.get("supplier_phone") or "")
+                    wa_phone = _phone_for_whatsapp(phone)
+                    if wa_phone:
+                        b.link_button(
+                            "💬 Contact Supplier",
+                            f"https://wa.me/{wa_phone}?text=Hello%2C%20I%20found%20your%20agricultural%20input%20listing%20on%20AGROW%20MarketLink.",
+                            width="stretch",
+                        )
+                    if phone:
+                        b.caption(f"☎ {phone}")
+
+    with prices_tab:
+        listings = fetch_market_listings(status="AVAILABLE")
+        if listings.empty:
+            st.info("The market price board will populate automatically as produce listings are published.")
+        else:
+            board = (
+                listings.groupby(["commodity", "product", "state", "unit"], dropna=False)
+                .agg(
+                    Listings=("id", "count"),
+                    Min_Price=("price", "min"),
+                    Average_Price=("price", "mean"),
+                    Max_Price=("price", "max"),
+                    Available=("available_quantity", "sum"),
+                )
+                .reset_index()
+            )
+            board["Min Price"] = board["Min_Price"].map(_money)
+            board["Average Price"] = board["Average_Price"].map(_money)
+            board["Max Price"] = board["Max_Price"].map(_money)
+            st.dataframe(
+                board[["commodity", "product", "state", "unit", "Listings", "Available", "Min Price", "Average Price", "Max Price"]]
+                .rename(columns={"commodity":"Commodity", "product":"Product", "state":"State", "unit":"Unit"}),
+                width="stretch",
+                hide_index=True,
+            )
+            st.caption("Prices are derived from current seller listings and are not an official commodity exchange benchmark.")
+
+
+def render_marketlink_workspace(df: pd.DataFrame, role: str, user_id: str):
+    st.markdown("## 🛒 AGROW MarketLink")
+    st.caption(
+        "Universal agricultural marketplace connecting verified farmers to consumers, off-takers and input suppliers. "
+        "Poultry is the first demonstration commodity; no additional feature build is required for maize, rice, soybean or other commodities."
+    )
+
+    listings = fetch_market_listings()
+    available = listings[listings["status"] == "AVAILABLE"] if not listings.empty else listings
+    input_products = fetch_input_products()
+    available_inputs = input_products[input_products["status"] == "AVAILABLE"] if not input_products.empty else input_products
+
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Available Produce Listings", len(available))
+    m2.metric("Commodities Listed", available["commodity"].nunique() if not available.empty else 0)
+    m3.metric("Input Products", len(available_inputs))
+    m4.metric("Buyer Enquiries", len(fetch_market_enquiries()))
+
+    sell_tab, browse_tab, input_tab, manage_tab = st.tabs(
+        ["➕ Create Produce Listing", "🌾 Browse Market", "🧰 Input Marketplace", "📋 Manage"]
+    )
+
+    with sell_tab:
+        eligible = df.copy()
+        if role == "agent" and not eligible.empty:
+            eligible = eligible[eligible["agent_id"] == user_id]
+        if not eligible.empty:
+            eligible = eligible[eligible["nin_status"].astype(str).str.lower() == "verified"]
+
+        if eligible.empty:
+            st.warning("No verified farmer is available to create a market listing. Verify a farmer record first.")
+        else:
+            eligible = eligible.copy()
+            eligible["market_label"] = eligible.apply(
+                lambda r: f"{r['farmer_id']} — {r['farmer_full_name']} ({r['state']} / {r['lga']})", axis=1
+            )
+            with st.form("create_market_listing_form", clear_on_submit=True):
+                farmer_label = st.selectbox("Verified Farmer", eligible["market_label"].tolist())
+                farmer = eligible[eligible["market_label"] == farmer_label].iloc[0]
+                c1, c2 = st.columns(2)
+                commodity = c1.selectbox("Commodity", MARKET_COMMODITIES)
+                product = c2.text_input("Product / Variety", placeholder="e.g. Broiler Chicken, Paddy Rice, Yellow Maize")
+                q1, q2, q3 = st.columns(3)
+                quantity = q1.number_input("Quantity Available", min_value=0.0, step=1.0)
+                unit = q2.selectbox("Unit", MARKET_UNITS)
+                price = q3.number_input("Asking Price per Unit (₦)", min_value=0.0, step=100.0)
+                ready_date = st.date_input("Ready / Harvest Date")
+                description = st.text_area("Listing Description", placeholder="Quality, grade, average weight, packaging, collection/delivery notes...")
+                st.caption(
+                    f"Location will be inherited from the farmer record: {farmer.get('community_village') or '-'}, "
+                    f"{farmer.get('lga') or '-'}, {normalize_state_name(farmer.get('state') or '-')}"
+                )
+                submit = st.form_submit_button("Publish to MarketLink", use_container_width=True, type="primary")
+                if submit:
+                    if not product.strip():
+                        st.error("Product / variety is required.")
+                    elif quantity <= 0:
+                        st.error("Quantity must be greater than zero.")
+                    elif price <= 0:
+                        st.error("Price must be greater than zero.")
+                    else:
+                        create_market_listing(
+                            farmer_id=str(farmer["farmer_id"]),
+                            commodity=commodity,
+                            product=product.strip(),
+                            quantity=quantity,
+                            unit=unit,
+                            price=price,
+                            ready_date=str(ready_date),
+                            state=str(farmer.get("state") or ""),
+                            lga=str(farmer.get("lga") or ""),
+                            community=str(farmer.get("community_village") or ""),
+                            description=description.strip(),
+                            created_by=user_id,
+                        )
+                        log_action(user_id, "MARKET_LISTING_CREATED", f"{farmer['farmer_id']} | {commodity} | {product}")
+                        st.success("Produce listing published to AGROW MarketLink.")
+                        st.rerun()
+
+    with browse_tab:
+        # Reuse the same public market experience inside the authenticated workspace.
+        render_public_marketlink()
+
+    with input_tab:
+        st.markdown("### List Agricultural Inputs")
+        st.caption("This generic input directory serves poultry, grains, legumes, roots, vegetables, livestock, aquaculture and future commodities.")
+        with st.form("create_input_product_form", clear_on_submit=True):
+            i1, i2 = st.columns(2)
+            supplier_name = i1.text_input("Supplier / Business Name")
+            supplier_phone = i2.text_input("Supplier Phone")
+            i3, i4 = st.columns(2)
+            category = i3.selectbox("Input Category", INPUT_CATEGORIES)
+            product_name = i4.text_input("Product Name", placeholder="e.g. Broiler Starter Feed, Urea Fertilizer")
+            applicable = st.multiselect("Applicable Commodities", MARKET_COMMODITIES, default=[])
+            i5, i6, i7 = st.columns(3)
+            input_qty = i5.number_input("Quantity Available", min_value=0.0, step=1.0)
+            input_unit = i6.selectbox("Unit", MARKET_UNITS, key="input_market_unit")
+            input_price = i7.number_input("Price per Unit (₦)", min_value=0.0, step=100.0)
+            i8, i9 = st.columns(2)
+            input_state = i8.selectbox("State", sorted(NIGERIA_LGA_MAP.keys()), key="input_market_state")
+            input_lgas = NIGERIA_LGA_MAP.get(input_state, [])
+            input_lga = i9.selectbox("LGA", input_lgas if input_lgas else ["N/A"], key="input_market_lga")
+            input_description = st.text_area("Description / Specification")
+            add_input = st.form_submit_button("Publish Input Product", use_container_width=True)
+            if add_input:
+                if not supplier_name.strip() or not supplier_phone.strip():
+                    st.error("Supplier name and phone are required.")
+                elif not product_name.strip():
+                    st.error("Product name is required.")
+                elif input_qty <= 0 or input_price <= 0:
+                    st.error("Quantity and price must be greater than zero.")
+                else:
+                    create_input_product(
+                        supplier_name=supplier_name.strip(), supplier_phone=supplier_phone.strip(),
+                        category=category, product_name=product_name.strip(),
+                        applicable_commodities=", ".join(applicable) if applicable else "All / General",
+                        quantity=input_qty, unit=input_unit, price=input_price,
+                        state=input_state, lga=input_lga, description=input_description.strip(),
+                        created_by=user_id,
+                    )
+                    log_action(user_id, "INPUT_PRODUCT_CREATED", f"{supplier_name} | {product_name}")
+                    st.success("Agricultural input published to MarketLink.")
+                    st.rerun()
+
+    with manage_tab:
+        st.markdown("### Produce Listings")
+        current = fetch_market_listings()
+        if role == "agent" and not current.empty:
+            # Agents manage only listings they created; administrators retain platform-wide oversight.
+            current = current[current["created_by"] == user_id]
+        if current.empty:
+            st.info("No produce listings to manage yet.")
+        else:
+            st.dataframe(
+                current[["id", "farmer_id", "commodity", "product", "available_quantity", "unit", "price", "status", "created_at"]],
+                width="stretch", hide_index=True,
+            )
+            options = {
+                f"#{int(r['id'])} — {r['farmer_id']} — {r['product']} — {r['status']}": int(r["id"])
+                for _, r in current.iterrows()
+            }
+            selected = st.selectbox("Select listing to update", list(options.keys()), key="manage_listing_select")
+            new_status = st.selectbox("Listing Status", ["AVAILABLE", "RESERVED", "SOLD", "WITHDRAWN"], key="manage_listing_status")
+            if st.button("Update Listing Status", key="update_market_status"):
+                update_listing_status(options[selected], new_status)
+                log_action(user_id, "MARKET_LISTING_STATUS", f"{options[selected]} -> {new_status}")
+                st.success("Listing status updated.")
+                st.rerun()
+
+        if role == "admin":
+            st.markdown("### Buyer Enquiries")
+            enquiries = fetch_market_enquiries()
+            if enquiries.empty:
+                st.info("No buyer enquiries yet.")
+            else:
+                st.dataframe(enquiries, width="stretch", hide_index=True)
+
+            st.markdown("### Input Listings")
+            products = fetch_input_products()
+            if products.empty:
+                st.info("No input products listed yet.")
+            else:
+                st.dataframe(products, width="stretch", hide_index=True)
+
+
+# =========================================================
 def show_auth():
     logo_path = get_logo_path()
 
@@ -948,6 +1454,9 @@ def show_auth():
     st.markdown("### Public Farmer Verification")
     st.caption("Farmers, field agents and input-distribution teams can confirm an enumeration record using a Farmer ID, phone number or the QR code printed on an AGROW Farmer ID card.")
     show_public_farmer_verification(compact=True)
+    st.divider()
+    with st.expander("🛒 Open AGROW MarketLink — Produce, Inputs & Market Prices", expanded=False):
+        render_public_marketlink()
     st.divider()
     st.markdown("### Secure Workspace Access")
 
@@ -1181,17 +1690,21 @@ def show_public_farmer_verification(compact=False, key_prefix="public"):
         return
 
     farmer = record.iloc[0]
-    photo_path = farmer.get("photo_path", "")
+    farmer_id_value = str(farmer.get("farmer_id", "") or "").strip()
+    photo_path = resolve_farmer_photo_path(
+        farmer.get("photo_path", ""),
+        farmer_id_value,
+    )
 
     st.success("✅ Farmer Verified")
 
     col1, col2 = st.columns([1, 2])
 
     with col1:
-        if photo_path and os.path.exists(photo_path):
+        if photo_path:
             st.image(photo_path, width=220)
         else:
-            st.warning("No photo available.")
+            st.warning("No photo available on this server for this farmer record.")
 
     with col2:
         st.markdown(f"""
@@ -1403,8 +1916,8 @@ else:
     # =========================================================
     # TAB LAYOUT
     # =========================================================
-    tab_dashboard, tab_farmer_registration, tab_distribution, tab_verification, tab_analytics = st.tabs(
-        ["📊 Dashboard", "📝 Farmer Registration", "📦 Distribution", "🔎 Farmer Verification", "📈 Analytics"]
+    tab_dashboard, tab_farmer_registration, tab_distribution, tab_verification, tab_marketlink, tab_analytics = st.tabs(
+        ["📊 Dashboard", "📝 Farmer Registration", "📦 Distribution", "🔎 Farmer Verification", "🛒 MarketLink", "📈 Analytics"]
     )
 
     # =========================================================
@@ -1782,9 +2295,13 @@ else:
                     photo_filename = f"{farmer_id}.jpg"
                     photo_path = save_uploaded_photo(
                         photo_capture,
-                        folder="uploads/farmers",
+                        folder=FARMER_PHOTO_DIR,
                         filename=photo_filename,
                     )
+                    photo_path = resolve_farmer_photo_path(photo_path, farmer_id)
+                    if not photo_path:
+                        st.error("Farmer photo could not be saved. The farmer record has not been submitted.")
+                        st.stop()
 
                 row = {
                     "Farmer_ID": farmer_id,
@@ -2022,9 +2539,12 @@ else:
 
             selected_index = photo_options.index(selected_photo_label)
             selected_row = photo_records.iloc[selected_index]
-            selected_photo_path = selected_row["photo_path"]
+            selected_photo_path = resolve_farmer_photo_path(
+                selected_row.get("photo_path", ""),
+                selected_row.get("farmer_id", ""),
+            )
 
-            if selected_photo_path and os.path.exists(selected_photo_path):
+            if selected_photo_path:
                 col1, col2 = st.columns([1, 2])
 
                 with col1:
@@ -2086,7 +2606,13 @@ else:
         show_public_farmer_verification(compact=True, key_prefix="workspace")
 
     # =========================================================
-    # TAB 5: ANALYTICS
+    # TAB 5: MARKETLINK
+    # =========================================================
+    with tab_marketlink:
+        render_marketlink_workspace(df, role, user_id)
+
+    # =========================================================
+    # TAB 6: ANALYTICS
     # =========================================================
     with tab_analytics:
         c1, c2 = st.columns(2)
@@ -2152,6 +2678,6 @@ else:
                 st.info("No registered agents yet.")
 
     st.markdown(
-        '<div class="footer">© DataDev Limited | AGROW — Agricultural Geographic Registration & Operations Workspace v4.2</div>',
+        '<div class="footer">© DataDev Limited | AGROW — Agricultural Geographic Registration & Operations Workspace v4.3 MarketLink Pilot</div>',
         unsafe_allow_html=True,
     )

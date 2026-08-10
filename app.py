@@ -6,6 +6,7 @@ from datetime import datetime
 import hmac
 import hashlib
 import time
+import json
 
 import pandas as pd
 import plotly.express as px
@@ -18,6 +19,7 @@ from reportlab.lib.utils import ImageReader
 from PIL import Image, ImageDraw, ImageFont
 import re
 from urllib.parse import quote
+from sqlalchemy import text
 
 from nigeria_lga_data import NIGERIA_LGA_MAP
 from core.db import get_connection, init_db, get_engine, DB_BACKEND
@@ -516,6 +518,115 @@ st.markdown(
         pointer-events: none;
     }}
 
+    /* =====================================================
+       PRODUCTION UI POLISH — visibility, touch targets, mobile
+       ===================================================== */
+    .stButton > button,
+    .stDownloadButton > button,
+    .stLinkButton > a {{
+        min-height: 48px !important;
+        border-radius: 10px !important;
+        font-weight: 800 !important;
+        font-size: 15px !important;
+        border: 1.5px solid {OFFICIAL_BLUE} !important;
+        box-shadow: 0 2px 6px rgba(0,0,0,0.08) !important;
+    }}
+
+    .stButton > button[kind="primary"],
+    .stFormSubmitButton > button[kind="primary"] {{
+        background: {OFFICIAL_BLUE} !important;
+        color: #FFFFFF !important;
+        border-color: {OFFICIAL_BLUE} !important;
+    }}
+
+    .stDownloadButton > button {{
+        background: {PRIMARY_GREEN} !important;
+        color: #FFFFFF !important;
+        border-color: {PRIMARY_GREEN} !important;
+    }}
+
+    .stLinkButton > a {{
+        background: #FFFFFF !important;
+        color: {OFFICIAL_BLUE} !important;
+    }}
+
+    /* Feature navigation: make every workspace module visually obvious. */
+    button[data-baseweb="tab"] {{
+        min-height: 52px !important;
+        padding: 9px 16px !important;
+        font-weight: 850 !important;
+        font-size: 14px !important;
+        color: {OFFICIAL_BLUE} !important;
+        background: #F4F8FB !important;
+        border: 1.5px solid #B8CBD9 !important;
+        border-radius: 11px !important;
+        box-shadow: 0 2px 5px rgba(0,75,135,0.07) !important;
+        margin-bottom: 4px !important;
+    }}
+
+    button[data-baseweb="tab"] p {{
+        color: inherit !important;
+        font-weight: 850 !important;
+    }}
+
+    button[data-baseweb="tab"]:hover {{
+        background: #E7F1F8 !important;
+        border-color: {OFFICIAL_BLUE} !important;
+    }}
+
+    button[data-baseweb="tab"][aria-selected="true"] {{
+        color: #FFFFFF !important;
+        background: {OFFICIAL_BLUE} !important;
+        border-color: {OFFICIAL_BLUE} !important;
+        box-shadow: 0 4px 10px rgba(0,75,135,0.20) !important;
+    }}
+
+    button[data-baseweb="tab"][aria-selected="true"] p {{
+        color: #FFFFFF !important;
+    }}
+
+    div[data-baseweb="tab-list"] {{
+        gap: 7px !important;
+        overflow-x: auto !important;
+        scrollbar-width: thin;
+        padding: 3px 2px 7px 2px !important;
+    }}
+
+    [data-testid="stExpander"] {{
+        background: #FFFFFF !important;
+        border: 1px solid #DDE3E8 !important;
+        border-radius: 12px !important;
+    }}
+
+    [data-testid="stVerticalBlockBorderWrapper"] {{
+        background: #FFFFFF;
+        border-radius: 12px;
+    }}
+
+    @media (max-width: 768px) {{
+        .stButton > button,
+        .stDownloadButton > button,
+        .stLinkButton > a {{
+            min-height: 50px !important;
+            font-size: 14px !important;
+        }}
+
+        button[data-baseweb="tab"] {{
+            min-width: max-content !important;
+            min-height: 46px !important;
+            padding: 7px 11px !important;
+            font-size: 13px !important;
+        }}
+
+        [data-testid="column"] {{
+            min-width: 0 !important;
+        }}
+
+        h1 {{ font-size: 1.55rem !important; }}
+        h2 {{ font-size: 1.35rem !important; }}
+        h3 {{ font-size: 1.15rem !important; }}
+    }}
+
     .footer {{
         position: fixed;
         bottom: 0;
@@ -528,6 +639,35 @@ st.markdown(
         border-top: 1px solid #ddd;
         z-index: 999;
         font-size: 12px;
+    }}
+
+    /* Production visibility refinements */
+    div.stButton > button, div.stDownloadButton > button, a[data-testid="stBaseLinkButton-primary"] {{
+        min-height: 44px !important;
+        font-weight: 800 !important;
+        border-radius: 10px !important;
+    }}
+    button[kind="primary"], a[data-testid="stBaseLinkButton-primary"] {{
+        background: #0069B4 !important;
+        color: #FFFFFF !important;
+        border: 1px solid #00558F !important;
+    }}
+    [data-baseweb="tab-list"] {{
+        gap: 6px !important;
+        flex-wrap: wrap !important;
+    }}
+    [data-baseweb="tab"] {{
+        background: #EEF5FA !important;
+        border: 1px solid #C7D9E8 !important;
+        border-radius: 8px 8px 0 0 !important;
+        padding: 9px 12px !important;
+        font-weight: 750 !important;
+        color: #163A54 !important;
+    }}
+    [aria-selected="true"][data-baseweb="tab"] {{
+        background: #E6F4EA !important;
+        color: #145A32 !important;
+        border-bottom: 3px solid #1B5E20 !important;
     }}
     </style>
     """,
@@ -571,19 +711,64 @@ def build_farmer_qr_identity_image(farmer, verification_url: str):
     draw.text((55,1020), "Scan to verify this farmer's AGROW record.", fill=(55,55,55), font=font)
     out=BytesIO(); card.save(out, format="PNG"); out.seek(0); return out
 
-STATE_GPS_ENVELOPES = {
-    "Jigawa": (10.5, 13.2, 8.0, 10.7),
-    "Kano": (10.4, 12.7, 7.5, 9.7),
-    "Kaduna": (9.0, 11.8, 6.0, 9.0),
-    "FCT": (8.2, 9.4, 6.6, 7.8),
-    "Federal Capital Territory": (8.2, 9.4, 6.6, 7.8),
+COUNTRY_GPS_ENVELOPES = {
+    "Nigeria": (4.0, 14.0, 2.5, 15.0),
+    "Ghana": (4.5, 11.5, -3.5, 1.5),
+    "Kenya": (-5.0, 5.5, 33.5, 42.5),
 }
 
-def gps_matches_assigned_state(state_name, latitude, longitude):
-    bounds = STATE_GPS_ENVELOPES.get(str(state_name or "").strip())
-    if not bounds: return None
-    a,b,c,d = bounds
-    return a <= latitude <= b and c <= longitude <= d
+# Practical state-level envelopes for Nigeria. These are validation guards, not
+# cadastral boundaries. Production deployments can override/add any country or
+# province using AGROW_TERRITORY_BOUNDS_JSON.
+NIGERIA_STATE_ENVELOPES = {
+    "Abia": (4.6,6.1,7.0,8.3), "Adamawa": (7.0,11.0,11.2,14.0), "Akwa Ibom": (4.3,5.6,7.4,8.7),
+    "Anambra": (5.6,6.8,6.5,7.6), "Bauchi": (9.0,12.6,8.5,12.0), "Bayelsa": (4.0,5.5,5.5,6.8),
+    "Benue": (6.4,8.3,7.5,10.2), "Borno": (10.0,14.2,11.5,14.8), "Cross River": (4.3,7.1,7.6,9.6),
+    "Delta": (5.0,6.5,5.0,6.8), "Ebonyi": (5.5,6.9,7.4,8.5), "Edo": (5.6,7.6,5.0,6.9),
+    "Ekiti": (7.2,8.1,4.8,5.9), "Enugu": (5.9,7.0,6.8,7.9), "FCT": (8.2,9.4,6.6,7.8),
+    "Gombe": (9.5,11.5,10.5,12.0), "Imo": (5.0,5.9,6.6,7.5), "Jigawa": (10.5,13.2,8.0,10.7),
+    "Kaduna": (9.0,11.8,6.0,9.0), "Kano": (10.4,12.7,7.5,9.7), "Katsina": (11.0,13.4,6.8,9.3),
+    "Kebbi": (10.0,13.3,3.5,6.8), "Kogi": (6.5,8.5,5.3,7.9), "Kwara": (7.5,10.0,2.7,6.2),
+    "Lagos": (6.2,6.8,2.6,4.5), "Nasarawa": (7.0,9.5,7.5,9.7), "Niger": (8.0,11.0,3.0,7.8),
+    "Ogun": (6.2,7.9,2.6,4.8), "Ondo": (5.7,7.8,4.3,6.2), "Osun": (6.8,8.2,4.0,5.2),
+    "Oyo": (7.0,9.0,2.7,4.7), "Plateau": (8.3,10.7,8.2,10.7), "Rivers": (4.3,5.8,6.2,7.7),
+    "Sokoto": (11.5,13.8,4.0,7.2), "Taraba": (6.4,9.8,9.0,12.2), "Yobe": (10.5,13.4,9.5,13.0),
+    "Zamfara": (10.5,13.2,5.5,7.7),
+}
+
+def _territory_bounds(country, region):
+    key = f"{str(country or '').strip()}|{str(region or '').strip()}"
+    raw = os.getenv("AGROW_TERRITORY_BOUNDS_JSON", "").strip()
+    if raw:
+        try:
+            custom = json.loads(raw)
+            value = custom.get(key)
+            if isinstance(value, (list, tuple)) and len(value) == 4:
+                return tuple(float(x) for x in value)
+        except Exception:
+            pass
+    if str(country).strip().lower() == "nigeria":
+        return NIGERIA_STATE_ENVELOPES.get(str(region or '').strip())
+    return None
+
+def validate_agent_territory(country, region, latitude, longitude):
+    country = str(country or "Nigeria").strip() or "Nigeria"
+    lat, lon = float(latitude), float(longitude)
+    country_bounds = COUNTRY_GPS_ENVELOPES.get(country)
+    if country_bounds:
+        a,b,c,d = country_bounds
+        if not (a <= lat <= b and c <= lon <= d):
+            return False, f"GPS is outside the assigned country: {country}."
+    region_bounds = _territory_bounds(country, region)
+    if region_bounds is None:
+        return None, (
+            f"No strict GPS boundary is configured yet for {country} / {region}. "
+            "An administrator must configure AGROW_TERRITORY_BOUNDS_JSON before agents can submit in this territory."
+        )
+    a,b,c,d = region_bounds
+    if not (a <= lat <= b and c <= lon <= d):
+        return False, f"GPS is outside the agent's assigned territory: {country} / {region}."
+    return True, f"GPS validated inside assigned territory: {country} / {region}."
 
 QR_SECRET_KEY = os.getenv("QR_SECRET_KEY", "change-this-secret-key")
 
@@ -755,13 +940,35 @@ def table_to_excel_download(df: pd.DataFrame, filename: str):
     )
 
 def is_db_available() -> bool:
+    return cached_db_available()
+
+@st.cache_data(ttl=20, show_spinner=False)
+def cached_db_available() -> bool:
     try:
-        from sqlalchemy import text
         with get_engine().connect() as conn:
             conn.execute(text("SELECT 1"))
         return True
     except Exception:
         return False
+
+@st.cache_data(ttl=20, show_spinner=False)
+def cached_farmers():
+    return fetch_farmers()
+
+@st.cache_data(ttl=15, show_spinner=False)
+def cached_market_listings(status=None):
+    return fetch_market_listings(status=status)
+
+@st.cache_data(ttl=30, show_spinner=False)
+def cached_input_products(status=None):
+    return fetch_input_products(status=status)
+
+@st.cache_data(ttl=15, show_spinner=False)
+def cached_market_enquiries():
+    return fetch_market_enquiries()
+
+def invalidate_read_caches():
+    cached_farmers.clear(); cached_market_listings.clear(); cached_input_products.clear(); cached_market_enquiries.clear(); cached_db_available.clear()
     
 def generate_farmer_qr_code(farmer_id: str):
     verification_url = f"{get_effective_app_base_url()}?farmer_id={farmer_id}"
@@ -956,6 +1163,143 @@ if "auto_sync_ran" not in st.session_state:
 # =========================================================
 # 8. AUTH SCREEN
 # =========================================================
+
+# =========================================================
+# MARKET PRICE INTELLIGENCE PERSISTENCE
+# =========================================================
+def ensure_market_price_table():
+    """Create the field market-price table without changing existing AGROW tables."""
+    id_column = "INTEGER PRIMARY KEY AUTOINCREMENT" if DB_BACKEND == "sqlite" else "BIGSERIAL PRIMARY KEY"
+    ddl = f"""
+    CREATE TABLE IF NOT EXISTS market_price_reports (
+        id {id_column},
+        commodity TEXT NOT NULL,
+        product TEXT,
+        market_name TEXT NOT NULL,
+        lga TEXT,
+        state TEXT NOT NULL,
+        unit TEXT NOT NULL,
+        farmgate_price REAL,
+        wholesale_price REAL,
+        retail_price REAL,
+        min_price REAL,
+        max_price REAL,
+        typical_price REAL NOT NULL,
+        source_type TEXT NOT NULL,
+        source_name TEXT,
+        notes TEXT,
+        reported_by TEXT,
+        reported_at TEXT NOT NULL,
+        verified_at TEXT,
+        status TEXT DEFAULT 'VERIFIED'
+    )
+    """
+    with get_engine().begin() as conn:
+        conn.execute(text(ddl))
+
+
+def save_market_price_report(**payload):
+    ensure_market_price_table()
+    payload = dict(payload)
+    payload.setdefault("reported_at", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+    payload.setdefault("verified_at", payload["reported_at"])
+    payload.setdefault("status", "VERIFIED")
+    sql = text("""
+        INSERT INTO market_price_reports (
+            commodity, product, market_name, lga, state, unit,
+            farmgate_price, wholesale_price, retail_price,
+            min_price, max_price, typical_price,
+            source_type, source_name, notes, reported_by,
+            reported_at, verified_at, status
+        ) VALUES (
+            :commodity, :product, :market_name, :lga, :state, :unit,
+            :farmgate_price, :wholesale_price, :retail_price,
+            :min_price, :max_price, :typical_price,
+            :source_type, :source_name, :notes, :reported_by,
+            :reported_at, :verified_at, :status
+        )
+    """)
+    with get_engine().begin() as conn:
+        conn.execute(sql, payload)
+
+
+def fetch_market_price_reports(limit=250):
+    ensure_market_price_table()
+    try:
+        with get_engine().connect() as conn:
+            rows = conn.execute(text("""
+                SELECT * FROM market_price_reports
+                WHERE COALESCE(status, 'VERIFIED') = 'VERIFIED'
+                ORDER BY reported_at DESC, id DESC
+                LIMIT :limit
+            """), {"limit": int(limit)}).mappings().all()
+        return pd.DataFrame([dict(r) for r in rows])
+    except Exception:
+        return pd.DataFrame()
+
+
+def _public_listing_url(listing_id) -> str:
+    return f"{get_effective_app_base_url()}?market=1&listing_id={int(listing_id)}"
+
+
+def render_public_listing_detail(listing_id):
+    """Render one public, shareable produce listing for consumers/off-takers."""
+    listings = cached_market_listings(status="AVAILABLE")
+    if listings.empty:
+        st.warning("This MarketLink listing is no longer available.")
+        return
+    try:
+        target_id = int(listing_id)
+    except Exception:
+        st.error("Invalid MarketLink listing reference.")
+        return
+    record = listings[listings["id"].astype(int) == target_id]
+    if record.empty:
+        st.warning("This MarketLink listing is unavailable, sold, paused or withdrawn.")
+        return
+    item = record.iloc[0]
+    st.markdown("## 🌾 AGROW MarketLink Listing")
+    st.success("✅ Produce listing from a verified AGROW farmer" if str(item.get("nin_status", "")).lower() == "verified" else "Produce listing from a registered AGROW farmer")
+    c1, c2 = st.columns([3, 2])
+    with c1:
+        st.markdown(f"### {item.get('product', '-')}")
+        st.write(f"**Commodity:** {item.get('commodity', '-')}")
+        st.write(f"**Available:** {float(item.get('available_quantity') or 0):g} {item.get('unit', '')}")
+        st.write(f"**Asking price:** {_money(item.get('price'))} / {item.get('unit', '')}")
+        st.write(f"**Ready / harvest date:** {item.get('ready_date') or '-'}")
+        st.write(f"**Location:** {item.get('community') or '-'}, {item.get('lga') or '-'}, {normalize_state_name(item.get('state') or '-')}")
+        if item.get('description'):
+            st.caption(str(item.get('description')))
+    with c2:
+        st.write(f"**Seller:** {item.get('farmer_full_name') or '-'}")
+        st.write(f"**Farmer ID:** {item.get('farmer_id') or '-'}")
+        seller_phone = str(item.get('phone_number') or '')
+        if seller_phone:
+            st.write(f"**Phone:** {seller_phone}")
+            wa_phone = _phone_for_whatsapp(seller_phone)
+            if wa_phone:
+                message = quote(_seller_message(item))
+                st.link_button("💬 WhatsApp Seller", f"https://wa.me/{wa_phone}?text={message}", width="stretch", type="primary")
+            st.link_button("📞 Call Seller", f"tel:{seller_phone}", width="stretch")
+        farmer_id = str(item.get('farmer_id') or '').strip()
+        if farmer_id:
+            verify_url = f"{get_effective_app_base_url()}?farmer_id={farmer_id}&sig={generate_qr_signature(farmer_id)}"
+            st.link_button("✅ Verify Farmer", verify_url, width="stretch")
+    with st.expander("📨 Request Quote / Send Buyer Enquiry", expanded=True):
+        with st.form(f"public_listing_enquiry_{target_id}"):
+            buyer_name = st.text_input("Your name")
+            buyer_phone = st.text_input("Phone number")
+            qty = st.number_input("Quantity requested", min_value=0.0, step=1.0)
+            enquiry_message = st.text_area("Message", placeholder="Delivery location, preferred date, quality/grade or other requirements")
+            if st.form_submit_button("Send Enquiry", type="primary", use_container_width=True):
+                if not buyer_name.strip() or not buyer_phone.strip():
+                    st.error("Your name and phone number are required.")
+                else:
+                    create_market_enquiry(target_id, buyer_name.strip(), buyer_phone.strip(), qty, enquiry_message.strip())
+                    st.success("Enquiry sent to AGROW MarketLink.")
+    st.caption("Share this page directly with consumers, processors, retailers and off-takers.")
+    st.code(_public_listing_url(target_id), language=None)
+
 # MARKETLINK — UNIVERSAL AGRICULTURAL MARKETPLACE
 # =========================================================
 MARKET_COMMODITIES = [
@@ -1083,7 +1427,7 @@ def render_public_marketlink():
     )
 
     with produce_tab:
-        listings = fetch_market_listings(status="AVAILABLE")
+        listings = cached_market_listings(status="AVAILABLE")
         if listings.empty:
             st.info("No produce listings are available yet. Verified farmer listings will appear here.")
         else:
@@ -1136,6 +1480,7 @@ def render_public_marketlink():
                             f"&sig={generate_qr_signature(farmer_id)}"
                         )
                         c2.link_button("✅ Verify Farmer", verification_url, width="stretch")
+                    c2.link_button("🌐 Open / Share Listing", _public_listing_url(item["id"]), width="stretch", type="primary")
                     c2.caption(f"Farmer ID: {farmer_id or '-'}")
 
                     with st.expander("📞 Contact Seller", expanded=False):
@@ -1169,7 +1514,7 @@ def render_public_marketlink():
                                     st.success("Enquiry recorded in AGROW. Use Contact Seller if you also want to call or message the farmer directly.")
 
     with inputs_tab:
-        products = fetch_input_products(status="AVAILABLE")
+        products = cached_input_products(status="AVAILABLE")
         if products.empty:
             st.info("No agricultural input listings are available yet.")
         else:
@@ -1211,31 +1556,93 @@ def render_public_marketlink():
                         b.caption(f"☎ {phone}")
 
     with prices_tab:
-        listings = fetch_market_listings(status="AVAILABLE")
+        st.markdown("#### 📊 Current Market Price Intelligence")
+        st.caption("AGROW separates seller asking prices from field-reported market prices so users can see the source of every figure.")
+
+        reports = fetch_market_price_reports()
+        if not reports.empty:
+            latest = reports.copy()
+            for col in ["typical_price", "min_price", "max_price", "farmgate_price", "wholesale_price", "retail_price"]:
+                if col in latest.columns:
+                    latest[col] = pd.to_numeric(latest[col], errors="coerce")
+            display_cols = [
+                "reported_at", "commodity", "product", "market_name", "lga", "state", "unit",
+                "typical_price", "min_price", "max_price", "source_type", "source_name"
+            ]
+            existing_cols = [c for c in display_cols if c in latest.columns]
+            st.dataframe(latest[existing_cols].head(60), width="stretch", hide_index=True)
+            st.caption("Field Market Price = time-stamped price captured by an authorised AGROW source at a named market.")
+
+            chart_df = latest.dropna(subset=["typical_price"]).head(30).copy()
+            if not chart_df.empty:
+                chart_df["Location"] = chart_df["market_name"].astype(str) + " · " + chart_df["state"].astype(str)
+                price_fig = px.bar(
+                    chart_df, x="Location", y="typical_price", color="commodity",
+                    hover_data=["product", "unit", "min_price", "max_price"],
+                    title="Current Typical Market Price by Location",
+                    labels={"typical_price":"Typical Price (₦)"},
+                )
+                price_fig.update_layout(paper_bgcolor="#F1F7F2", plot_bgcolor="#F8FBF8", xaxis_title="Market / State")
+                st.plotly_chart(price_fig, width="stretch")
+
+                range_df = chart_df[["commodity","product","Location","unit","min_price","typical_price","max_price"]].copy()
+                range_df["Price Expectation"] = range_df.apply(
+                    lambda r: f"₦{float(r['min_price'] or r['typical_price']):,.0f} – ₦{float(r['max_price'] or r['typical_price']):,.0f} / {r['unit']}", axis=1
+                )
+                st.markdown("##### 📈 Price Expectation Range")
+                st.dataframe(range_df[["commodity","product","Location","Price Expectation"]], width="stretch", hide_index=True)
+        else:
+            st.info("No verified field market-price reports have been submitted yet.")
+
+        listings = cached_market_listings(status="AVAILABLE")
+        st.markdown("#### 🌾 AGROW Seller Listing Prices")
         if listings.empty:
-            st.info("The market price board will populate automatically as produce listings are published.")
+            st.info("Seller price statistics will populate automatically as produce listings are published.")
         else:
             board = (
                 listings.groupby(["commodity", "product", "state", "unit"], dropna=False)
                 .agg(
                     Listings=("id", "count"),
-                    Min_Price=("price", "min"),
-                    Average_Price=("price", "mean"),
-                    Max_Price=("price", "max"),
                     Available=("available_quantity", "sum"),
+                    **{"Min Price": ("price", "min"), "Average Price": ("price", "mean"), "Max Price": ("price", "max")},
                 )
                 .reset_index()
             )
-            board["Min Price"] = board["Min_Price"].map(_money)
-            board["Average Price"] = board["Average_Price"].map(_money)
-            board["Max Price"] = board["Max_Price"].map(_money)
+            for col in ["Min Price", "Average Price", "Max Price"]:
+                board[col] = board[col].map(lambda v: f"₦{float(v):,.2f}")
             st.dataframe(
-                board[["commodity", "product", "state", "unit", "Listings", "Available", "Min Price", "Average Price", "Max Price"]]
-                .rename(columns={"commodity":"Commodity", "product":"Product", "state":"State", "unit":"Unit"}),
-                width="stretch",
-                hide_index=True,
+                board[["commodity", "product", "state", "unit", "Listings", "Available", "Min Price", "Average Price", "Max Price"]],
+                width="stretch", hide_index=True,
             )
-            st.caption("Prices are derived from current seller listings and are not an official commodity exchange benchmark.")
+            st.caption("AGROW Seller Listing Price = current asking prices from active MarketLink listings; it is not the same as a completed trade or official exchange benchmark.")
+
+
+def seed_marketlink_presentation_data(user_id="ADMIN"):
+    """Insert clearly labelled sample records only when matching DEMO rows do not exist."""
+    inputs = [
+        ("[DEMO] GreenFields Agro Supplies", "08030000001", "Animal Feed", "Broiler Starter Feed", "Poultry", 120, "bag", 28500, "FCT", "Gwagwalada", "DEMO DATA · 25kg starter feed for broilers."),
+        ("[DEMO] VetCare Agro", "08030000002", "Veterinary", "Poultry Multivitamin", "Poultry", 80, "unit", 6500, "FCT", "Abaji", "DEMO DATA · Poultry vitamin/mineral supplement."),
+        ("[DEMO] Northern Inputs Hub", "08030000003", "Fertilizer", "NPK 15-15-15", "Maize, Rice", 300, "bag", 52000, "Kaduna", "Chikun", "DEMO DATA · 50kg NPK fertilizer."),
+        ("[DEMO] Kano Farm Inputs", "08030000004", "Fertilizer", "Urea 46%", "Rice, Maize", 250, "bag", 48000, "Kano", "Nassarawa", "DEMO DATA · 50kg urea fertilizer."),
+        ("[DEMO] SeedLink Nigeria", "08030000005", "Seeds & Planting Materials", "Certified Maize Seed", "Maize", 90, "bag", 18000, "Kaduna", "Igabi", "DEMO DATA · Certified maize seed for presentation."),
+        ("[DEMO] RiceGrow Inputs", "08030000006", "Seeds & Planting Materials", "Certified Rice Seed", "Rice", 110, "bag", 22000, "Jigawa", "Dutse", "DEMO DATA · Certified rice seed for presentation."),
+    ]
+    existing = cached_input_products()
+    existing_names = set(existing.get("supplier_name", pd.Series(dtype=str)).astype(str).tolist()) if not existing.empty else set()
+    for row in inputs:
+        if row[0] not in existing_names:
+            create_input_product(supplier_name=row[0], supplier_phone=row[1], category=row[2], product_name=row[3],
+                applicable_commodities=row[4], quantity=row[5], unit=row[6], price=row[7], state=row[8], lga=row[9],
+                description=row[10], created_by=user_id)
+    reports = fetch_market_price_reports()
+    if reports.empty or not reports.get("source_name", pd.Series(dtype=str)).astype(str).str.contains("DEMO", na=False).any():
+        demo_prices = [
+            dict(commodity="Maize",product="Yellow Maize",market_name="Abaji Market",lga="Abaji",state="FCT",unit="bag",farmgate_price=56000,wholesale_price=59000,retail_price=63000,min_price=55000,max_price=65000,typical_price=60000,source_type="AGROW Field Enumerator",source_name="[DEMO] Abaji Market Survey",notes="DEMO / SAMPLE MARKET DATA",reported_by=user_id),
+            dict(commodity="Rice",product="Paddy Rice",market_name="Dutse Market",lga="Dutse",state="Jigawa",unit="bag",farmgate_price=68000,wholesale_price=72000,retail_price=76000,min_price=67000,max_price=78000,typical_price=72500,source_type="AGROW Field Enumerator",source_name="[DEMO] Dutse Market Survey",notes="DEMO / SAMPLE MARKET DATA",reported_by=user_id),
+            dict(commodity="Poultry",product="Broiler Chicken",market_name="Gwagwalada Market",lga="Gwagwalada",state="FCT",unit="bird",farmgate_price=8500,wholesale_price=9300,retail_price=10500,min_price=8200,max_price=11000,typical_price=9500,source_type="AGROW Field Enumerator",source_name="[DEMO] Gwagwalada Poultry Survey",notes="DEMO / SAMPLE MARKET DATA",reported_by=user_id),
+        ]
+        for payload in demo_prices: save_market_price_report(**payload)
+    invalidate_read_caches()
 
 
 def render_marketlink_workspace(df: pd.DataFrame, role: str, user_id: str):
@@ -1244,20 +1651,31 @@ def render_marketlink_workspace(df: pd.DataFrame, role: str, user_id: str):
         "Universal agricultural marketplace connecting verified farmers to consumers, off-takers and input suppliers. "
         "Poultry is the first demonstration commodity; no additional feature build is required for maize, rice, soybean or other commodities."
     )
+    if role == "admin":
+        if st.button("🧪 Load Sample MarketLink Presentation Data", key="seed_market_demo", type="secondary"):
+            seed_marketlink_presentation_data(user_id)
+            st.success("Sample agricultural inputs and market-price records loaded. All sample records are labelled DEMO.")
+            st.rerun()
 
-    listings = fetch_market_listings()
+    listings = cached_market_listings()
     available = listings[listings["status"] == "AVAILABLE"] if not listings.empty else listings
-    input_products = fetch_input_products()
+    input_products = cached_input_products()
     available_inputs = input_products[input_products["status"] == "AVAILABLE"] if not input_products.empty else input_products
 
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("Available Produce Listings", len(available))
     m2.metric("Commodities Listed", available["commodity"].nunique() if not available.empty else 0)
     m3.metric("Input Products", len(available_inputs))
-    m4.metric("Buyer Enquiries", len(fetch_market_enquiries()))
+    m4.metric("Buyer Enquiries", len(cached_market_enquiries()))
 
-    sell_tab, browse_tab, input_tab, manage_tab = st.tabs(
-        ["➕ Create Produce Listing", "🌾 Browse Market", "🧰 Input Marketplace", "📋 Manage"]
+    sell_tab, browse_tab, input_tab, price_report_tab, manage_tab = st.tabs(
+        [
+            "➕ Create Produce Listing",
+            "🌾 Browse Market",
+            "🧰 Input Marketplace",
+            "📊 Report Market Price",
+            "📋 Manage",
+        ]
     )
 
     with sell_tab:
@@ -1314,6 +1732,7 @@ def render_marketlink_workspace(df: pd.DataFrame, role: str, user_id: str):
                             created_by=user_id,
                         )
                         log_action(user_id, "MARKET_LISTING_CREATED", f"{farmer['farmer_id']} | {commodity} | {product}")
+                        invalidate_read_caches()
                         st.success("Produce listing published to AGROW MarketLink.")
                         st.rerun()
 
@@ -1359,12 +1778,55 @@ def render_marketlink_workspace(df: pd.DataFrame, role: str, user_id: str):
                         created_by=user_id,
                     )
                     log_action(user_id, "INPUT_PRODUCT_CREATED", f"{supplier_name} | {product_name}")
+                    invalidate_read_caches()
                     st.success("Agricultural input published to MarketLink.")
                     st.rerun()
 
+    with price_report_tab:
+        st.markdown("### 📍 Report Current Market Price")
+        st.caption("For authorised agents/administrators: capture a named market, unit, source and timestamp. This feeds the public Market Price Board separately from farmer asking prices.")
+        with st.form("market_price_report_form", clear_on_submit=True):
+            r1, r2, r3 = st.columns(3)
+            rp_commodity = r1.selectbox("Commodity", MARKET_COMMODITIES, key="price_report_commodity")
+            rp_product = r2.text_input("Product / Variety / Grade", placeholder="e.g. Yellow Maize, Paddy Rice, Broiler Chicken")
+            rp_unit = r3.selectbox("Unit", MARKET_UNITS, key="price_report_unit")
+            r4, r5, r6 = st.columns(3)
+            rp_state = r4.selectbox("State", sorted(NIGERIA_LGA_MAP.keys()), key="price_report_state")
+            rp_lgas = NIGERIA_LGA_MAP.get(rp_state, [])
+            rp_lga = r5.selectbox("LGA", rp_lgas if rp_lgas else ["N/A"], key="price_report_lga")
+            rp_market = r6.text_input("Market Name", placeholder="e.g. Abaji Main Market")
+            p1, p2, p3 = st.columns(3)
+            rp_min = p1.number_input("Observed Minimum (₦)", min_value=0.0, step=100.0)
+            rp_typical = p2.number_input("Typical / Average (₦)", min_value=0.0, step=100.0)
+            rp_max = p3.number_input("Observed Maximum (₦)", min_value=0.0, step=100.0)
+            p4, p5, p6 = st.columns(3)
+            rp_farmgate = p4.number_input("Farm-gate (₦, optional)", min_value=0.0, step=100.0)
+            rp_wholesale = p5.number_input("Wholesale (₦, optional)", min_value=0.0, step=100.0)
+            rp_retail = p6.number_input("Retail (₦, optional)", min_value=0.0, step=100.0)
+            rp_source_type = st.selectbox("Source Type", ["AGROW Field Enumerator", "Market Association", "Government / Official", "Partner Dataset", "Other"])
+            rp_source_name = st.text_input("Source / Contact / Reference", placeholder="e.g. Abaji Market Association / Daily field survey")
+            rp_notes = st.text_area("Notes", placeholder="Quality, bag size, moisture, live weight, grade, transaction context, etc.")
+            if st.form_submit_button("✅ Publish Verified Market Price", type="primary", use_container_width=True):
+                if not rp_market.strip():
+                    st.error("Market name is required.")
+                elif rp_typical <= 0:
+                    st.error("Typical / average market price must be greater than zero.")
+                else:
+                    save_market_price_report(
+                        commodity=rp_commodity, product=rp_product.strip(), market_name=rp_market.strip(),
+                        lga=rp_lga, state=rp_state, unit=rp_unit,
+                        farmgate_price=rp_farmgate or None, wholesale_price=rp_wholesale or None, retail_price=rp_retail or None,
+                        min_price=rp_min or None, max_price=rp_max or None, typical_price=rp_typical,
+                        source_type=rp_source_type, source_name=rp_source_name.strip(), notes=rp_notes.strip(),
+                        reported_by=user_id,
+                    )
+                    log_action(user_id, "MARKET_PRICE_REPORTED", f"{rp_commodity} | {rp_market} | {rp_typical}")
+                    invalidate_read_caches()
+                    st.success("Market price published to the AGROW public Price Board.")
+
     with manage_tab:
         st.markdown("### Produce Listings")
-        current = fetch_market_listings()
+        current = cached_market_listings()
         if role == "agent" and not current.empty:
             # Agents manage only listings they created; administrators retain platform-wide oversight.
             current = current[current["created_by"] == user_id]
@@ -1389,14 +1851,14 @@ def render_marketlink_workspace(df: pd.DataFrame, role: str, user_id: str):
 
         if role == "admin":
             st.markdown("### Buyer Enquiries")
-            enquiries = fetch_market_enquiries()
+            enquiries = cached_market_enquiries()
             if enquiries.empty:
                 st.info("No buyer enquiries yet.")
             else:
                 st.dataframe(enquiries, width="stretch", hide_index=True)
 
             st.markdown("### Input Listings")
-            products = fetch_input_products()
+            products = cached_input_products()
             if products.empty:
                 st.info("No input products listed yet.")
             else:
@@ -1404,6 +1866,427 @@ def render_marketlink_workspace(df: pd.DataFrame, role: str, user_id: str):
 
 
 # =========================================================
+
+# =========================================================
+# FARMER MARKET PORTAL — VERIFIED FARMER SELF-SERVICE
+# =========================================================
+def _normalise_registered_phone(value: str) -> str:
+    digits = re.sub(r"\D", "", str(value or ""))
+    if digits.startswith("234") and len(digits) == 13:
+        digits = "0" + digits[3:]
+    return digits
+
+
+def _farmer_record_by_id(farmer_id: str):
+    farmer_id = str(farmer_id or "").strip().upper()
+    if not farmer_id:
+        return None
+    farmers = cached_farmers()
+    if farmers.empty or "farmer_id" not in farmers.columns:
+        return None
+    match = farmers[
+        farmers["farmer_id"].astype(str).str.strip().str.upper() == farmer_id
+    ]
+    return None if match.empty else match.iloc[0]
+
+
+def _ensure_farmer_market_credentials_table() -> None:
+    with get_engine().begin() as conn:
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS farmer_market_credentials (
+                farmer_id TEXT PRIMARY KEY,
+                pin_hash TEXT NOT NULL,
+                salt TEXT NOT NULL,
+                activated_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+        """))
+
+
+def _farmer_credential(farmer_id: str):
+    _ensure_farmer_market_credentials_table()
+    with get_engine().connect() as conn:
+        row = conn.execute(
+            text("SELECT farmer_id, pin_hash, salt, activated_at, updated_at FROM farmer_market_credentials WHERE farmer_id=:farmer_id"),
+            {"farmer_id": str(farmer_id or "").strip().upper()},
+        ).mappings().first()
+    return row
+
+
+def _hash_farmer_pin(farmer_id: str, pin: str, salt_hex: str) -> str:
+    material = f"{str(farmer_id).strip().upper()}::{str(pin)}".encode("utf-8")
+    return hashlib.pbkdf2_hmac(
+        "sha256",
+        material,
+        bytes.fromhex(salt_hex),
+        160_000,
+    ).hex()
+
+
+def _set_farmer_pin(farmer_id: str, pin: str) -> None:
+    farmer_id = str(farmer_id or "").strip().upper()
+    salt_hex = os.urandom(16).hex()
+    pin_hash = _hash_farmer_pin(farmer_id, pin, salt_hex)
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    _ensure_farmer_market_credentials_table()
+    with get_engine().begin() as conn:
+        existing = conn.execute(
+            text("SELECT farmer_id FROM farmer_market_credentials WHERE farmer_id=:farmer_id"),
+            {"farmer_id": farmer_id},
+        ).first()
+        if existing:
+            conn.execute(
+                text("""
+                    UPDATE farmer_market_credentials
+                    SET pin_hash=:pin_hash, salt=:salt, updated_at=:updated_at
+                    WHERE farmer_id=:farmer_id
+                """),
+                {
+                    "farmer_id": farmer_id,
+                    "pin_hash": pin_hash,
+                    "salt": salt_hex,
+                    "updated_at": now,
+                },
+            )
+        else:
+            conn.execute(
+                text("""
+                    INSERT INTO farmer_market_credentials
+                    (farmer_id, pin_hash, salt, activated_at, updated_at)
+                    VALUES (:farmer_id, :pin_hash, :salt, :activated_at, :updated_at)
+                """),
+                {
+                    "farmer_id": farmer_id,
+                    "pin_hash": pin_hash,
+                    "salt": salt_hex,
+                    "activated_at": now,
+                    "updated_at": now,
+                },
+            )
+
+
+def _verify_farmer_pin(farmer_id: str, pin: str) -> bool:
+    cred = _farmer_credential(farmer_id)
+    if not cred:
+        return False
+    candidate = _hash_farmer_pin(farmer_id, pin, str(cred["salt"]))
+    return hmac.compare_digest(candidate, str(cred["pin_hash"]))
+
+
+def _farmer_is_verified(farmer) -> bool:
+    if farmer is None:
+        return False
+    return str(farmer.get("nin_status", "") or "").strip().lower() == "verified"
+
+
+def render_farmer_market_login() -> None:
+    st.markdown("### 🌾 Farmer Market Portal")
+    st.caption(
+        "Verified AGROW farmers can publish produce directly to MarketLink. "
+        "Your Farmer ID is your username. On first activation, use the phone number registered during enumeration, then create a private PIN."
+    )
+
+    pending_farmer_id = st.session_state.get("farmer_activation_id", "")
+    if pending_farmer_id:
+        farmer = _farmer_record_by_id(pending_farmer_id)
+        if farmer is None:
+            st.session_state.pop("farmer_activation_id", None)
+            st.error("Farmer record is no longer available. Start activation again.")
+            return
+
+        st.success(f"Identity confirmed for {farmer.get('farmer_full_name', 'Farmer')} — {pending_farmer_id}")
+        p1, p2 = st.columns(2)
+        new_pin = p1.text_input("Create 4–6 digit PIN", type="password", max_chars=6, key="farmer_new_pin")
+        confirm_pin = p2.text_input("Confirm PIN", type="password", max_chars=6, key="farmer_confirm_pin")
+        if st.button("🔐 Activate Farmer Market Access", width="stretch", type="primary", key="activate_farmer_market"):
+            if not re.fullmatch(r"\d{4,6}", str(new_pin or "")):
+                st.error("PIN must contain 4 to 6 digits.")
+            elif new_pin != confirm_pin:
+                st.error("PIN entries do not match.")
+            else:
+                _set_farmer_pin(pending_farmer_id, new_pin)
+                st.session_state.pop("farmer_activation_id", None)
+                st.session_state.logged_in = True
+                st.session_state.user_id = pending_farmer_id
+                st.session_state.role = "farmer"
+                log_action(pending_farmer_id, "FARMER_MARKET_ACTIVATED", "Farmer Market Portal PIN created")
+                st.rerun()
+        if st.button("Cancel activation", width="stretch", key="cancel_farmer_activation"):
+            st.session_state.pop("farmer_activation_id", None)
+            st.rerun()
+        return
+
+    farmer_id = st.text_input(
+        "Farmer ID",
+        placeholder="e.g. AG-20260808111836",
+        key="farmer_market_login_id",
+    ).strip().upper()
+    access_code = st.text_input(
+        "PIN / Registered Phone Number",
+        type="password",
+        key="farmer_market_login_code",
+    )
+
+    if st.button("🌾 Open Farmer Market Portal", width="stretch", type="primary", key="farmer_market_login_button"):
+        farmer = _farmer_record_by_id(farmer_id)
+        if farmer is None:
+            st.error("Farmer ID was not found in the active AGROW registry.")
+            return
+        if not _farmer_is_verified(farmer):
+            st.error("This Farmer ID is not yet verified. Farmer Market access is available only to verified records.")
+            return
+
+        cred = _farmer_credential(farmer_id)
+        if cred:
+            if not _verify_farmer_pin(farmer_id, access_code):
+                st.error("Invalid Farmer ID or PIN.")
+                return
+            st.session_state.logged_in = True
+            st.session_state.user_id = farmer_id
+            st.session_state.role = "farmer"
+            log_action(farmer_id, "FARMER_MARKET_LOGIN", "Successful farmer market login")
+            st.rerun()
+        else:
+            registered_phone = _normalise_registered_phone(farmer.get("phone_number", ""))
+            supplied_phone = _normalise_registered_phone(access_code)
+            if not registered_phone or supplied_phone != registered_phone:
+                st.error("First-time activation requires the phone number registered on this Farmer ID.")
+                return
+            st.session_state["farmer_activation_id"] = farmer_id
+            st.rerun()
+
+    with st.expander("Forgot PIN / Reset Access"):
+        st.caption("Pilot reset: confirm the Farmer ID and registered phone number, then create a new PIN.")
+        reset_id = st.text_input("Farmer ID for reset", key="farmer_reset_id").strip().upper()
+        reset_phone = st.text_input("Registered phone number", type="password", key="farmer_reset_phone")
+        if st.button("Verify and Reset PIN", width="stretch", key="farmer_reset_button"):
+            farmer = _farmer_record_by_id(reset_id)
+            if farmer is None or not _farmer_is_verified(farmer):
+                st.error("Verified farmer record not found.")
+            elif _normalise_registered_phone(reset_phone) != _normalise_registered_phone(farmer.get("phone_number", "")):
+                st.error("Registered phone number does not match this Farmer ID.")
+            else:
+                st.session_state["farmer_activation_id"] = reset_id
+                st.rerun()
+
+
+def render_farmer_market_portal(farmer_id: str) -> None:
+    farmer = _farmer_record_by_id(farmer_id)
+    if farmer is None:
+        st.error("Your farmer record could not be loaded. Please sign in again.")
+        st.session_state.logged_in = False
+        st.session_state.user_id = None
+        st.session_state.role = None
+        return
+
+    if not _farmer_is_verified(farmer):
+        st.error("This farmer record is not currently verified for MarketLink self-service.")
+        return
+
+    farmer_id = str(farmer.get("farmer_id", "") or "").strip().upper()
+    farmer_name = str(farmer.get("farmer_full_name", "Farmer") or "Farmer")
+    photo_path = resolve_farmer_photo_path(farmer.get("photo_path", ""), farmer_id)
+
+    st.sidebar.markdown("### 🌾 Farmer Market")
+    st.sidebar.write(f"**{farmer_name}**")
+    st.sidebar.caption(farmer_id)
+    st.sidebar.write("✅ Verified Farmer")
+    if st.sidebar.button("Logout", width="stretch", key="farmer_market_logout"):
+        log_action(farmer_id, "FARMER_MARKET_LOGOUT", "Farmer logged out")
+        st.session_state.logged_in = False
+        st.session_state.user_id = None
+        st.session_state.role = None
+        st.rerun()
+
+    st.markdown("## 🌾 AGROW Farmer Market Portal")
+    st.caption("Publish your produce, track your listings, review buyer enquiries, check market prices and find agricultural inputs.")
+
+    p1, p2 = st.columns([1, 3])
+    with p1:
+        if photo_path:
+            st.image(photo_path, width=180)
+    with p2:
+        st.markdown(f"### {farmer_name}")
+        st.write(f"**Farmer ID:** {farmer_id}")
+        st.write(f"**Location:** {farmer.get('community_village') or '-'}, {farmer.get('lga') or '-'}, {normalize_state_name(farmer.get('state') or '-')}")
+        st.write(f"**Primary enterprise:** {farmer.get('primary_crop') or '-'}")
+        st.success("✅ Verified agricultural profile")
+
+    listings = cached_market_listings()
+    mine = listings[listings["farmer_id"].astype(str).str.upper() == farmer_id] if not listings.empty else listings
+    active_mine = mine[mine["status"] == "AVAILABLE"] if not mine.empty else mine
+    enquiries = cached_market_enquiries()
+    my_enquiries = enquiries[enquiries["farmer_id"].astype(str).str.upper() == farmer_id] if not enquiries.empty else enquiries
+
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Active Listings", len(active_mine))
+    m2.metric("Total Listings", len(mine))
+    m3.metric("Buyer Enquiries", len(my_enquiries))
+
+    sell_tab, listings_tab, prices_tab, inputs_tab, enquiries_tab, profile_tab = st.tabs(
+        ["➕ Sell Produce", "📦 My Listings", "💰 Market Prices", "🧰 Agricultural Inputs", "💬 Buyer Enquiries", "👤 My Profile"]
+    )
+
+    with sell_tab:
+        st.markdown("### Create Produce Listing")
+        st.caption("Your verified identity and registered location are attached automatically and cannot be changed from this listing form.")
+        with st.form("farmer_self_market_listing", clear_on_submit=True):
+            c1, c2 = st.columns(2)
+            commodity = c1.selectbox("Commodity", MARKET_COMMODITIES, key="farmer_self_commodity")
+            product = c2.text_input("Product / Variety", placeholder="e.g. Broiler Chicken, Paddy Rice, Yellow Maize")
+            q1, q2, q3 = st.columns(3)
+            quantity = q1.number_input("Quantity Available", min_value=0.0, step=1.0)
+            unit = q2.selectbox("Unit", MARKET_UNITS, key="farmer_self_unit")
+            price = q3.number_input("Asking Price per Unit (₦)", min_value=0.0, step=100.0)
+            ready_date = st.date_input("Ready / Harvest Date", key="farmer_self_ready")
+            description = st.text_area("Listing Description", placeholder="Quality, grade, average weight, packaging and collection/delivery notes")
+            st.info(
+                f"📍 Listing location: {farmer.get('community_village') or '-'}, {farmer.get('lga') or '-'}, "
+                f"{normalize_state_name(farmer.get('state') or '-')}"
+            )
+            submit = st.form_submit_button("🚀 Publish to MarketLink", use_container_width=True, type="primary")
+            if submit:
+                if not product.strip():
+                    st.error("Product / variety is required.")
+                elif quantity <= 0:
+                    st.error("Quantity must be greater than zero.")
+                elif price <= 0:
+                    st.error("Price must be greater than zero.")
+                else:
+                    create_market_listing(
+                        farmer_id=farmer_id,
+                        commodity=commodity,
+                        product=product.strip(),
+                        quantity=quantity,
+                        unit=unit,
+                        price=price,
+                        ready_date=str(ready_date),
+                        state=str(farmer.get("state") or ""),
+                        lga=str(farmer.get("lga") or ""),
+                        community=str(farmer.get("community_village") or ""),
+                        description=description.strip(),
+                        created_by=farmer_id,
+                    )
+                    log_action(farmer_id, "FARMER_SELF_LISTING_CREATED", f"{commodity} | {product.strip()}")
+                    invalidate_read_caches()
+                    st.success("Your produce is now published on AGROW MarketLink.")
+                    st.rerun()
+
+    with listings_tab:
+        if mine.empty:
+            st.info("You have not published any produce yet.")
+        else:
+            for _, item in mine.iterrows():
+                with st.container(border=True):
+                    a, b = st.columns([3, 1])
+                    a.markdown(f"#### {item.get('product', '-')}")
+                    a.write(
+                        f"**{item.get('commodity', '-')}** · {float(item.get('available_quantity') or 0):g} {item.get('unit', '')} · "
+                        f"**{_money(item.get('price'))} / {item.get('unit', '')}**"
+                    )
+                    a.caption(f"Status: {item.get('status', '-')} · Ready: {item.get('ready_date') or '-'}")
+                    if str(item.get("status", "")) == "AVAILABLE":
+                        if b.button("Mark Sold", key=f"farmer_mark_sold_{int(item['id'])}", width="stretch"):
+                            update_listing_status(int(item["id"]), "SOLD")
+                            log_action(farmer_id, "MARKET_LISTING_SOLD", str(item["id"]))
+                            st.rerun()
+                        if b.button("Pause", key=f"farmer_pause_{int(item['id'])}", width="stretch"):
+                            update_listing_status(int(item["id"]), "PAUSED")
+                            st.rerun()
+                    elif str(item.get("status", "")) == "PAUSED":
+                        if b.button("Re-list", key=f"farmer_relist_{int(item['id'])}", width="stretch"):
+                            update_listing_status(int(item["id"]), "AVAILABLE")
+                            st.rerun()
+
+    with prices_tab:
+        current = cached_market_listings(status="AVAILABLE")
+        if current.empty:
+            st.info("The market price board will populate as produce listings are published.")
+        else:
+            board = (
+                current.groupby(["commodity", "product", "state", "unit"], dropna=False)
+                .agg(
+                    Listings=("id", "count"),
+                    Available=("available_quantity", "sum"),
+                    Min_Price=("price", "min"),
+                    Average_Price=("price", "mean"),
+                    Max_Price=("price", "max"),
+                )
+                .reset_index()
+            )
+            board["Min Price"] = board["Min_Price"].map(_money)
+            board["Average Price"] = board["Average_Price"].map(_money)
+            board["Max Price"] = board["Max_Price"].map(_money)
+            st.dataframe(
+                board[["commodity", "product", "state", "unit", "Listings", "Available", "Min Price", "Average Price", "Max Price"]],
+                width="stretch",
+                hide_index=True,
+            )
+            st.caption("MarketLink prices reflect current seller listings and are not an official commodity exchange benchmark.")
+
+    with inputs_tab:
+        products = cached_input_products(status="AVAILABLE")
+        if products.empty:
+            st.info("No agricultural input products are listed yet.")
+        else:
+            categories = ["All"] + sorted(products["category"].dropna().unique().tolist())
+            category = st.selectbox("Input category", categories, key="farmer_input_category")
+            shown = products if category == "All" else products[products["category"] == category]
+            for _, item in shown.head(30).iterrows():
+                with st.container(border=True):
+                    a, b = st.columns([3, 1])
+                    a.markdown(f"#### {item.get('product_name', '-')}")
+                    a.caption(f"{item.get('category', '-')} · Supplier: {item.get('supplier_name', '-')}")
+                    a.write(f"**{_money(item.get('price'))} / {item.get('unit', '')}**")
+                    a.write(f"📍 {item.get('lga') or '-'}, {normalize_state_name(item.get('state') or '-')}")
+                    phone = str(item.get("supplier_phone") or "")
+                    wa_phone = _phone_for_whatsapp(phone)
+                    if wa_phone:
+                        b.link_button(
+                            "💬 Contact Supplier",
+                            f"https://wa.me/{wa_phone}?text=Hello%2C%20I%20found%20your%20input%20listing%20on%20AGROW%20MarketLink.",
+                            width="stretch",
+                        )
+
+    with enquiries_tab:
+        if my_enquiries.empty:
+            st.info("No buyer enquiries have been recorded for your listings yet.")
+        else:
+            st.dataframe(
+                my_enquiries[["created_at", "product", "buyer_name", "buyer_phone", "quantity_requested", "message", "status"]],
+                width="stretch",
+                hide_index=True,
+            )
+
+    with profile_tab:
+        c1, c2 = st.columns([1, 2])
+        if photo_path:
+            c1.image(photo_path, width=220)
+        c2.write(f"**Farmer ID:** {farmer_id}")
+        c2.write(f"**Name:** {farmer_name}")
+        c2.write(f"**Phone:** {farmer.get('phone_number') or '-'}")
+        c2.write(f"**State:** {normalize_state_name(farmer.get('state') or '-')}")
+        c2.write(f"**LGA:** {farmer.get('lga') or '-'}")
+        c2.write(f"**Crop / Enterprise:** {farmer.get('primary_crop') or '-'}")
+        verification_url = (
+            f"{get_effective_app_base_url()}?farmer_id={farmer_id}"
+            f"&sig={generate_qr_signature(farmer_id)}"
+        )
+        c2.link_button("✅ Open Public Verified Record", verification_url, width="stretch")
+        try:
+            farmer_pdf = generate_farmer_id_card_pdf(farmer, photo_path, get_logo_path())
+            st.download_button(
+                "⬇️ Download Farmer ID Card (PDF)",
+                data=farmer_pdf.getvalue(),
+                file_name=f"{farmer_name.replace(' ', '_')}_{farmer_id}_Farmer_ID_Card.pdf",
+                mime="application/pdf",
+                width="stretch",
+                type="primary",
+                key="farmer_portal_download_id",
+            )
+        except Exception as exc:
+            st.warning(f"Farmer ID card could not be generated at this moment: {exc}")
+
 def show_auth():
     logo_path = get_logo_path()
 
@@ -1455,12 +2338,16 @@ def show_auth():
     st.caption("Farmers, field agents and input-distribution teams can confirm an enumeration record using a Farmer ID, phone number or the QR code printed on an AGROW Farmer ID card.")
     show_public_farmer_verification(compact=True)
     st.divider()
-    with st.expander("🛒 Open AGROW MarketLink — Produce, Inputs & Market Prices", expanded=False):
+    market_access_url = f"{get_effective_app_base_url()}?market=1"
+    ma1, ma2 = st.columns(2)
+    ma1.link_button("🛒 Browse Public MarketLink", market_access_url, width="stretch", type="primary")
+    ma2.caption("Consumers, off-takers and processors can browse verified farmer produce without logging in.")
+    with st.expander("Preview MarketLink on this page", expanded=False):
         render_public_marketlink()
     st.divider()
     st.markdown("### Secure Workspace Access")
 
-    tab1, tab2, tab3 = st.tabs(["Login", "Agent Signup", "Password"])
+    tab1, tab2, tab3, tab4 = st.tabs(["Staff Login", "Agent Signup", "Password", "🌾 Farmer Market"])
 
     with tab1:
         default_username = st.session_state.get("prefill_login_username", "")
@@ -1500,14 +2387,23 @@ def show_auth():
         nin = st.text_input("NIN", max_chars=11, key="signup_nin")
         email = st.text_input("Email Address", key="signup_email")
 
+        country = st.selectbox("Country of Assignment", ["Nigeria", "Ghana", "Kenya"], key="signup_country")
         state_options = sorted(list(NIGERIA_LGA_MAP.keys()))
-        state = st.selectbox("State of Coverage", state_options, key="signup_state")
-        lga_options = NIGERIA_LGA_MAP.get(state, [])
-        lga_coverage = st.selectbox(
-            "LGA of Coverage",
-            lga_options if lga_options else ["N/A"],
-            key="signup_lga",
-        )
+        if country == "Nigeria":
+            state = st.selectbox("State / Province of Coverage", state_options, key="signup_state")
+            lga_options = NIGERIA_LGA_MAP.get(state, [])
+            lga_coverage = st.selectbox(
+                "LGA / District of Coverage",
+                lga_options if lga_options else ["N/A"],
+                key="signup_lga",
+            )
+        else:
+            state = st.text_input("State / Province / Region of Coverage", key="signup_state")
+            lga_coverage = st.text_input("District / County / Local Area", key="signup_lga")
+            st.caption(
+                "International territories require an administrator-defined GPS boundary in "
+                "AGROW_TERRITORY_BOUNDS_JSON before field submissions are accepted."
+            )
 
         password = st.text_input("Create Password", type="password", key="signup_password")
         confirm_password = st.text_input("Confirm Password", type="password", key="signup_confirm_password")
@@ -1547,13 +2443,13 @@ def show_auth():
             else:
                 agent_id = preview_id
                 clean_password = password.strip()
-                insert_user(agent_id, clean_password, "agent", full_name, phone, nin, state, lga_coverage, email)
+                insert_user(agent_id, clean_password, "agent", full_name, phone, nin, state, lga_coverage, email, country=country)
                 saved_user = fetch_user(agent_id)
                 if not saved_user or str(saved_user["pw"]).strip() != clean_password:
                     st.error("The account could not be verified after registration. Please try again.")
                     st.stop()
                 save_uploaded_photo(signup_photo, str(AGENT_PHOTO_DIR), f"{agent_id}.png")
-                log_action(agent_id, "AGENT_CREATED", f"{state} / {lga_coverage}")
+                log_action(agent_id, "AGENT_CREATED", f"{country} / {state} / {lga_coverage}")
 
                 st.session_state["prefill_login_username"] = agent_id
                 st.session_state["last_created_agent_id"] = agent_id
@@ -1564,6 +2460,7 @@ def show_auth():
                     "signup_phone",
                     "signup_nin",
                     "signup_email",
+                    "signup_country",
                     "signup_state",
                     "signup_lga",
                     "signup_password",
@@ -1603,6 +2500,9 @@ def show_auth():
                 update_user_password(cp_user, cp_new)
                 log_action(cp_user, "PASSWORD_CHANGED", "Password updated from login screen")
                 st.success("Password updated successfully.")
+
+    with tab4:
+        render_farmer_market_login()
 
     st.markdown("</div>", unsafe_allow_html=True)
 
@@ -1662,7 +2562,7 @@ def show_public_farmer_verification(compact=False, key_prefix="public"):
             st.warning("Enter Farmer ID or Phone Number.")
             return
 
-    df = fetch_farmers()
+    df = cached_farmers()
 
     if df.empty:
         st.warning("No farmer records available.")
@@ -1734,12 +2634,38 @@ def show_public_farmer_verification(compact=False, key_prefix="public"):
 # =========================================================
 # 9. APP BODY
 # =========================================================
+public_market_mode = str(st.query_params.get("market", "")).strip().lower() in {"1", "true", "yes"}
+public_listing_id = st.query_params.get("listing_id", "")
+
+if not st.session_state.logged_in and public_market_mode:
+    st.markdown(
+        """
+        <div style="text-align:center; margin-bottom:16px;">
+            <div style="font-size:clamp(24px,4vw,34px);font-weight:900;color:#004B87;">AGROW MarketLink</div>
+            <div style="font-size:clamp(13px,2vw,17px);font-weight:700;color:#1B5E20;">Verified agricultural produce, inputs and market-price intelligence</div>
+        </div>
+        """, unsafe_allow_html=True
+    )
+    if public_listing_id:
+        render_public_listing_detail(public_listing_id)
+        st.link_button("← Browse all MarketLink listings", f"{get_effective_app_base_url()}?market=1", width="stretch")
+    else:
+        render_public_marketlink()
+    st.divider()
+    st.link_button("🔎 Farmer Verification / Secure Access", get_effective_app_base_url(), width="stretch")
+    st.stop()
+
 if not st.session_state.logged_in:
     show_auth()
 
 else:
     user_id = st.session_state.user_id
     role = st.session_state.role
+
+    if role == "farmer":
+        render_farmer_market_portal(user_id)
+        st.stop()
+
     user_meta = fetch_user(user_id) or {}
 
     # continue dashboard here...
@@ -1754,13 +2680,6 @@ else:
      show_auth()
      st.stop()
 
-    def is_db_available():
-        try:
-            conn = get_connection()
-            conn.close()
-            return True
-        except Exception:
-            return False
 
     logo_path = get_logo_path()
 
@@ -1810,7 +2729,8 @@ else:
     st.sidebar.write(f"**Role:** {(role or 'Guest').title()}")
 
     if role == "agent":
-        st.sidebar.write(f"**Coverage State:** {normalize_state_name(user_meta.get('state', '-'))}")
+        st.sidebar.write(f"**Country:** {user_meta.get('country', 'Nigeria')}")
+        st.sidebar.write(f"**Coverage State / Province:** {normalize_state_name(user_meta.get('state', '-'))}")
         st.sidebar.write(f"**Coverage LGA:** {user_meta.get('lga_coverage', '-')}")
 
     if st.sidebar.button("Logout", width="stretch"):
@@ -1869,7 +2789,7 @@ else:
     st.caption("Powered by DataDev Limited | Agricultural Value-Chain Infrastructure")
 
     if is_db_available():
-        st.success("🟢 ONLINE MODE: Data syncing to central database")
+        st.success("🟢 ONLINE MODE: Central database connected")
     else:
         st.warning("🟡 OFFLINE MODE: Data stored locally and will sync later")
 
@@ -1900,7 +2820,7 @@ else:
     # -------------------------
     # Dashboard data
     # -------------------------
-    df = fetch_farmers()
+    df = cached_farmers()
 
     if selected_state != "All Nigeria" and not df.empty:
         df = df[df["state"] == selected_state]
@@ -2134,15 +3054,25 @@ else:
 
         st.markdown("---")
         st.markdown("### Section 3: Coverage and Location")
+        assigned_country = str(user_meta.get("country") or "Nigeria")
         if role == "admin":
-            farmer_state = st.selectbox("State", state_options, key=f"farmer_state_{form_v}")
+            farmer_country = st.selectbox("Country", ["Nigeria", "Ghana", "Kenya"], key=f"farmer_country_{form_v}")
+        else:
+            farmer_country = assigned_country
+            st.text_input("Country", value=farmer_country, disabled=True, key=f"farmer_country_display_{form_v}")
+        if farmer_country != "Nigeria":
+            st.warning("International pilot territory requires administrator-configured regional GPS bounds before agent submission.")
+        if role == "admin":
+            farmer_state = (st.selectbox("State / Province / Region", state_options, key=f"farmer_state_{form_v}")
+                            if farmer_country == "Nigeria" else st.text_input("State / Province / Region", key=f"farmer_state_{form_v}"))
         else:
             farmer_state = user_meta.get("state", "")
             st.text_input("State", value=farmer_state, disabled=True, key=f"farmer_state_display_{form_v}")
 
-        lga_list = NIGERIA_LGA_MAP.get(farmer_state, [])
+        lga_list = NIGERIA_LGA_MAP.get(farmer_state, []) if farmer_country == "Nigeria" else []
         if role == "admin":
-            farmer_lga = st.selectbox("LGA", lga_list if lga_list else ["N/A"], key=f"farmer_lga_{form_v}")
+            farmer_lga = (st.selectbox("LGA / District", lga_list, key=f"farmer_lga_{form_v}") if lga_list
+                          else st.text_input("LGA / District", key=f"farmer_lga_{form_v}"))
         else:
             assigned_lga = user_meta.get("lga_coverage", "")
             farmer_lga = assigned_lga if assigned_lga in lga_list or assigned_lga else (lga_list[0] if lga_list else "N/A")
@@ -2234,13 +3164,13 @@ else:
             longitude = st.number_input("Longitude", format="%.6f", key=lon_key)
 
         if role == "agent" and latitude and longitude:
-            geofence_result = gps_matches_assigned_state(farmer_state, float(latitude), float(longitude))
+            geofence_result, territory_message = validate_agent_territory(farmer_country, farmer_state, float(latitude), float(longitude))
             if geofence_result is False:
-                st.error(f"GPS is outside the broad {normalize_state_name(farmer_state)} operating envelope.")
+                st.error(territory_message)
             elif geofence_result is True:
-                st.success(f"GPS is consistent with the assigned state: {normalize_state_name(farmer_state)}.")
+                st.success(territory_message)
             else:
-                st.info("State and LGA are locked to the agent assignment. Precise boundary validation requires official GIS polygons.")
+                st.warning(territory_message)
 
         st.markdown("---")
         st.markdown("### Section 9: Farmer Photo Capture")
@@ -2280,8 +3210,8 @@ else:
                 st.error("Farmer photo capture is required.")
             elif latitude == 0.0 and longitude == 0.0:
                 st.error("Capture the farm GPS location before submission. Allow browser location access and try again.")
-            elif role == "agent" and gps_matches_assigned_state(farmer_state, float(latitude), float(longitude)) is False:
-                st.error("Submission blocked: GPS is outside the agent's assigned-state operating envelope.")
+            elif role == "agent" and validate_agent_territory(farmer_country, farmer_state, float(latitude), float(longitude))[0] is not True:
+                st.error("Submission blocked: GPS must validate inside the agent's assigned country and state/province territory.")
             elif not record_confirmed:
                 st.error("Please confirm that the farmer's information has been reviewed before submission.")
             elif farmer_exists_today(phone_number, nin, farmer_full_name):
@@ -2314,6 +3244,7 @@ else:
                     "Alternate_Phone": alternate_phone,
                     "Email_Address": email_address,
                     "NIN": nin,
+                    "Country": farmer_country,
                     "State": farmer_state,
                     "LGA": farmer_lga,
                     "Ward": ward,
@@ -2329,6 +3260,9 @@ else:
                     "ID_Number": id_number,
                     "Latitude": latitude,
                     "Longitude": longitude,
+                    "GPS_Accuracy": st.session_state.get(accuracy_key),
+                    "Territory_Status": "VALIDATED" if role != "agent" or validate_agent_territory(farmer_country, farmer_state, float(latitude), float(longitude))[0] is True else "REVIEW",
+                    "GPS_Validated_At": now.strftime("%Y-%m-%d %H:%M:%S"),
                     "Enumerator_Remarks": remarks,
                     "Photo_Path": photo_path,
                     "Photo_Status": "Captured" if photo_path else "No Photo",
@@ -2336,6 +3270,7 @@ else:
 
                 if is_db_available():
                     insert_farmer(row)
+                    invalidate_read_caches()
                     log_action(user_id, "FARMER_REGISTERED", farmer_id)
                     success_text = "✅ Farmer record saved directly to the main database."
                 else:
@@ -2369,6 +3304,23 @@ else:
                 names="Input_Type",
                 values="Count",
                 hole=0.5,
+            )
+            # Soft agricultural green canvas gives the donut definition without
+            # competing with Plotly's categorical segment colours.
+            pie_fig.update_layout(
+                paper_bgcolor="#F1F7F2",
+                plot_bgcolor="#F1F7F2",
+                margin=dict(l=28, r=28, t=32, b=28),
+                legend=dict(
+                    bgcolor="rgba(255,255,255,0.72)",
+                    bordercolor="#D5E4D8",
+                    borderwidth=1,
+                ),
+                font=dict(color="#26352B"),
+            )
+            pie_fig.update_traces(
+                marker=dict(line=dict(color="#FFFFFF", width=1.5)),
+                textfont=dict(color="#26352B"),
             )
             st.plotly_chart(pie_fig, width="stretch")
         else:
@@ -2678,6 +3630,6 @@ else:
                 st.info("No registered agents yet.")
 
     st.markdown(
-        '<div class="footer">© DataDev Limited | AGROW — Agricultural Geographic Registration & Operations Workspace v4.3 MarketLink Pilot</div>',
+        '<div class="footer">© DataDev Limited | AGROW — Agricultural Geographic Registration & Operations Workspace v4.4 Farmer Market Portal</div>',
         unsafe_allow_html=True,
     )

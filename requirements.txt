@@ -9,3 +9,5 @@ pillow
 openpyxl
 reportlab
 streamlit-geolocation
+fastapi
+uvicorn

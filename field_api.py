@@ -58,17 +58,101 @@ def auth(authorization: Optional[str]):
         return agent
     except Exception: raise HTTPException(401,'Invalid or expired token')
 
+def ensure_sync_receipts_table():
+    """Server-side audit trail for Field-device synchronization.
+
+    Device-local PENDING records are intentionally invisible to the central
+    AGROW server until the device reconnects. Once a sync attempt reaches this
+    API, the receipt is recorded here for central monitoring.
+    """
+    engine = get_engine()
+    id_column = "INTEGER PRIMARY KEY AUTOINCREMENT" if engine.dialect.name == "sqlite" else "BIGSERIAL PRIMARY KEY"
+    ddl = f"""
+    CREATE TABLE IF NOT EXISTS field_sync_receipts (
+        id {id_column},
+        farmer_id TEXT NOT NULL,
+        agent_id TEXT NOT NULL,
+        sync_status TEXT NOT NULL,
+        received_at TEXT NOT NULL,
+        error_message TEXT
+    )
+    """
+    with engine.begin() as conn:
+        conn.execute(text(ddl))
+
+
+def record_sync_receipt(farmer_id: str, agent_id: str, status: str, error: str = ""):
+    ensure_sync_receipts_table()
+    with get_engine().begin() as conn:
+        conn.execute(
+            text("""
+                INSERT INTO field_sync_receipts
+                    (farmer_id, agent_id, sync_status, received_at, error_message)
+                VALUES (:farmer_id, :agent_id, :sync_status, :received_at, :error_message)
+            """),
+            {
+                "farmer_id": farmer_id,
+                "agent_id": agent_id,
+                "sync_status": status,
+                "received_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "error_message": error[:500] if error else None,
+            },
+        )
+
+
+ensure_sync_receipts_table()
+
 class Login(BaseModel): username:str; password:str
 class FieldRecord(BaseModel):
     farmer_id:str; registration_date:str; farmer_full_name:str; gender:str=''; date_of_birth:str=''; phone_number:str; alternate_phone:str=''; email_address:str=''; nin:str=''; state:str; lga:str; ward:str=''; community_village:str=''; residential_address:str=''; primary_crop:str=''; secondary_crop:str=''; farm_size_ha:float=0; input_distributed:str=''; quantity_units:int=0; nin_status:str='Pending'; id_type:str=''; id_number:str=''; latitude:float; longitude:float; gps_accuracy:Optional[float]=None; enumerator_remarks:str=''; photo_data:str=''; photo_mime:str='image/jpeg'
 class SyncPayload(BaseModel): records:List[FieldRecord]
 
 @app.post('/api/field/login')
-def login(data:Login):
-    u=fetch_user(data.username)
-    if not u or u['role']!='agent' or str(u['pw'])!=data.password: raise HTTPException(401,'Invalid agent credentials')
-    country='Nigeria'; state=u.get('state') or ''; lga=u.get('lga_coverage') or ''
-    return {'token':make_token(u['username']),'agent':{'id':u['username'],'name':u['full_name'],'country':country,'state':state,'lga':lga,'bounds':territory_bounds(country,state)}}
+def login(data: Login):
+    username = str(data.username or '').strip().upper()
+    password = str(data.password or '').strip()
+
+    if not username or not password:
+        raise HTTPException(401, 'Invalid agent credentials')
+
+    engine = get_engine()
+    with engine.connect() as conn:
+        row = conn.execute(
+            text("""
+                SELECT id, pw, role, full_name, phone, nin, state, lga, email
+                FROM users
+                WHERE UPPER(id) = :username
+                LIMIT 1
+            """),
+            {'username': username},
+        ).mappings().first()
+
+    if not row:
+        raise HTTPException(401, 'Invalid agent credentials')
+
+    u = dict(row)
+    stored_password = str(u.get('pw') or '').strip()
+    role = str(u.get('role') or '').strip().lower()
+
+    if role != 'agent' or stored_password != password:
+        raise HTTPException(401, 'Invalid agent credentials')
+
+    agent_id = str(u.get('id') or username).strip().upper()
+    country = 'Nigeria'
+    state = str(u.get('state') or '').strip()
+    lga = str(u.get('lga') or '').strip()
+
+    return {
+        'token': make_token(agent_id),
+        'agent': {
+            'id': agent_id,
+            'name': str(u.get('full_name') or agent_id).strip(),
+            'country': country,
+            'state': state,
+            'lga': lga,
+            'bounds': territory_bounds(country, state),
+        },
+    }
 
 @app.get('/api/field/health')
 def health(): return {'ok':True,'service':'AGROW Field Sync API'}
@@ -76,7 +160,13 @@ def health(): return {'ok':True,'service':'AGROW Field Sync API'}
 @app.post('/api/field/sync')
 def sync(data:SyncPayload, authorization:Optional[str]=Header(None)):
     agent=auth(authorization); engine=get_engine(); results=[]
-    user=fetch_user(agent); country='Nigeria'; assigned_state=user.get('state') if user else ''
+    with engine.connect() as conn:
+        user_row = conn.execute(
+            text("SELECT id, role, state, lga FROM users WHERE UPPER(id)=:agent LIMIT 1"),
+            {'agent': str(agent).strip().upper()},
+        ).mappings().first()
+    user = dict(user_row) if user_row else None
+    country='Nigeria'; assigned_state=str(user.get('state') or '').strip() if user else ''
     for r in data.records:
         try:
             if r.state != assigned_state: raise ValueError(f'Record state {r.state} does not match assigned state {assigned_state}')
@@ -87,9 +177,27 @@ def sync(data:SyncPayload, authorization:Optional[str]=Header(None)):
             if not exists:
                 row={'Farmer_ID':r.farmer_id,'Registration_Date':r.registration_date,'Agent_ID':agent,'Farmer_Full_Name':r.farmer_full_name,'Gender':r.gender,'Date_of_Birth':r.date_of_birth,'Phone_Number':r.phone_number,'Alternate_Phone':r.alternate_phone,'Email_Address':r.email_address,'NIN':r.nin,'State':r.state,'LGA':r.lga,'Ward':r.ward,'Community_Village':r.community_village,'Residential_Address':r.residential_address,'Primary_Crop':r.primary_crop,'Secondary_Crop':r.secondary_crop,'Farm_Size_Ha':r.farm_size_ha,'Input_Distributed':r.input_distributed,'Quantity_Units':r.quantity_units,'NIN_Status':r.nin_status,'ID_Type':r.id_type,'ID_Number':r.id_number,'Latitude':r.latitude,'Longitude':r.longitude,'Enumerator_Remarks':f'{r.enumerator_remarks} | GPS accuracy: {r.gps_accuracy or "-"}m | Territory: VALIDATED','Photo_Path':'','Photo_Status':'Captured' if r.photo_data else 'No Photo','Photo_Data':r.photo_data,'Photo_Mime':r.photo_mime}
                 insert_farmer(row)
+            record_sync_receipt(r.farmer_id, agent, 'SYNCED')
             results.append({'farmer_id':r.farmer_id,'status':'SYNCED'})
-        except Exception as e: results.append({'farmer_id':r.farmer_id,'status':'FAILED','error':str(e)[:300]})
+        except Exception as e:
+            err = str(e)[:300]
+            record_sync_receipt(r.farmer_id, agent, 'FAILED', err)
+            results.append({'farmer_id':r.farmer_id,'status':'FAILED','error':err})
     return {'results':results}
+
+@app.get('/api/field/sync/receipts')
+def sync_receipts(authorization:Optional[str]=Header(None), limit:int=100):
+    agent=auth(authorization)
+    ensure_sync_receipts_table()
+    with get_engine().connect() as conn:
+        rows=conn.execute(text("""
+            SELECT farmer_id, agent_id, sync_status, received_at, error_message
+            FROM field_sync_receipts
+            WHERE agent_id=:agent
+            ORDER BY id DESC
+            LIMIT :limit
+        """), {'agent':agent, 'limit':max(1,min(int(limit),500))}).mappings().all()
+    return {'results':[dict(r) for r in rows]}
 
 app.mount('/assets', StaticFiles(directory=STATIC), name='assets')
 @app.get('/')

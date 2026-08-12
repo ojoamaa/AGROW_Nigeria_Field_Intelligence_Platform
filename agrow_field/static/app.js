@@ -18,4 +18,39 @@ $('gpsBtn').onclick=()=>{if(!navigator.geolocation){renderGPS('Geolocation unava
 function nigeria(){return (agent?.country||'').toLowerCase()==='nigeria'}function validate(){const errors=[];const phone=$('phone').value.trim(),nin=$('nin').value.trim(),alt=$('altphone').value.trim();if(!$('name').value.trim())errors.push('Full name is required.');if(!phone)errors.push('Phone number is required.');if(nigeria()&&!/^\d{11}$/.test(phone))errors.push('Nigerian phone number must be exactly 11 digits.');if(nin&&!/^\d{11}$/.test(nin))errors.push('NIN must be exactly 11 digits.');if(nigeria()&&alt&&!/^\d{11}$/.test(alt))errors.push('Alternate Nigerian phone must be exactly 11 digits.');if(!$('gender').value)errors.push('Select gender.');if(!$('crop').value)errors.push('Select a primary crop / commodity.');if(!gps)errors.push('Capture GPS before saving.');else if(!inBounds(gps.lat,gps.lon,agent.bounds))errors.push('GPS is outside the agent assigned territory.');if(!photoData)errors.push('Capture or select the farmer photo.');return errors}
 $('saveBtn').onclick=async()=>{const errors=validate();if(errors.length)return alert(errors.join('\n'));const inputParts=[$('inputCategory').value,$('inputProduct').value.trim(),$('inputQty').value?`${$('inputQty').value} ${$('inputUnit').value}`:''].filter(Boolean);const remarks=[$('remarks').value.trim(),$('farmType').value&&`Farm type: ${$('farmType').value}`,$('farmingSystem').value&&`Farming system: ${$('farmingSystem').value}`,$('landTenure').value&&`Land tenure: ${$('landTenure').value}`].filter(Boolean).join(' | ');const r={farmer_id:fid(),registration_date:new Date().toISOString(),farmer_full_name:$('name').value.trim(),phone_number:$('phone').value.trim(),alternate_phone:$('altphone').value.trim(),email_address:$('email').value.trim(),gender:$('gender').value,date_of_birth:$('dob').value,nin:$('nin').value.trim(),state:agent.state,lga:agent.lga,ward:$('ward').value.trim(),community_village:$('community').value.trim(),residential_address:$('address').value.trim(),primary_crop:$('crop').value,secondary_crop:$('crop2').value,farm_size_ha:Number($('farm').value||0),input_distributed:inputParts.join(' — '),quantity_units:Math.round(Number($('inputQty').value||0)),latitude:gps.lat,longitude:gps.lon,gps_accuracy:gps.accuracy,enumerator_remarks:remarks,photo_data:photoData,photo_mime:photoMime,sync_status:'PENDING'};await put(r);alert('Farmer saved on device. Sync status: PENDING');resetForm();$('form').classList.add('hidden');refresh()};
 function resetForm(){document.querySelectorAll('#form input:not([readonly]),#form textarea').forEach(x=>x.value='');document.querySelectorAll('#form select').forEach(x=>x.selectedIndex=0);$('preview').classList.add('hidden');$('preview').removeAttribute('src');$('photoMsg').textContent='No farmer photo captured.';gps=null;photoData='';photoMime='image/jpeg';renderGPS()}
-$('syncBtn').onclick=async()=>{if(!navigator.onLine)return alert('No internet connection');const rs=(await all()).filter(x=>x.sync_status!=='SYNCED');if(!rs.length)return alert('No pending records');try{const r=await fetch('/api/field/sync',{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+token},body:JSON.stringify({records:rs})});if(!r.ok)throw new Error('Sync request failed');const j=await r.json();for(const x of j.results){const rec=rs.find(q=>q.farmer_id===x.farmer_id);rec.sync_status=x.status;rec.error=x.error||'';await put(rec)}await refresh();alert('Sync completed')}catch(e){alert(e.message)}};$('logoutBtn').onclick=()=>{if(confirm('Remove this device activation? Pending records remain on the device.')){localStorage.removeItem('agrowAgent');localStorage.removeItem('agrowToken');agent=null;token='';showApp()}};window.addEventListener('online',refresh);window.addEventListener('offline',refresh);if('serviceWorker'in navigator)navigator.serviceWorker.register('/sw.js');fillOptions();showApp();
+async function syncPending({silent=false}={}){
+  if(!agent||!token)return false;
+  if(!navigator.onLine){if(!silent)alert('No internet connection');await refresh();return false}
+  const rs=(await all()).filter(x=>x.sync_status!=='SYNCED');
+  if(!rs.length){if(!silent)alert('No pending records');await refresh();return true}
+  for(const rec of rs){rec.sync_status='SYNCING';rec.error='';await put(rec)}
+  await refresh();
+  try{
+    const r=await fetch('/api/field/sync',{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+token},body:JSON.stringify({records:rs})});
+    if(r.status===401){throw new Error('Device activation expired. Log in once online to reactivate this device.')}
+    if(!r.ok){let detail='Sync request failed';try{const body=await r.json();detail=body.detail||detail}catch(_){ }throw new Error(detail)}
+    const j=await r.json();
+    for(const rec of rs){
+      const x=(j.results||[]).find(q=>q.farmer_id===rec.farmer_id);
+      if(x){rec.sync_status=x.status;rec.error=x.error||''}
+      else{rec.sync_status='FAILED';rec.error='Central server returned no receipt for this record.'}
+      await put(rec)
+    }
+    await refresh();
+    if(!silent){const failed=(j.results||[]).filter(x=>x.status==='FAILED').length;alert(failed?`Sync completed with ${failed} failed record(s). Review the queue and retry.`:'Sync completed. Central AGROW has received the record(s).')}
+    return true
+  }catch(e){
+    for(const rec of rs){rec.sync_status='FAILED';rec.error=e.message;await put(rec)}
+    await refresh();
+    if(!silent)alert(e.message);
+    return false
+  }
+}
+$('syncBtn').onclick=()=>syncPending({silent:false});
+$('logoutBtn').onclick=()=>{if(confirm('Remove this device activation? Pending records remain on the device.')){localStorage.removeItem('agrowAgent');localStorage.removeItem('agrowToken');agent=null;token='';showApp()}};
+let reconnectTimer=null;
+window.addEventListener('online',()=>{refresh();clearTimeout(reconnectTimer);reconnectTimer=setTimeout(()=>syncPending({silent:true}),1500)});
+window.addEventListener('offline',refresh);
+if('serviceWorker'in navigator)navigator.serviceWorker.register('/sw.js');
+fillOptions();showApp();
+if(navigator.onLine&&agent&&token){setTimeout(()=>syncPending({silent:true}),2000)};

@@ -6,7 +6,6 @@ from datetime import datetime
 import hmac
 import hashlib
 import time
-import json
 
 import pandas as pd
 import plotly.express as px
@@ -53,6 +52,43 @@ from services.market_service import (
 )
 
 load_dotenv()
+
+
+def ensure_field_sync_receipts_table():
+    """Central audit trail written by AGROW Field after reconnect/sync."""
+    try:
+        engine = get_engine()
+        id_column = "INTEGER PRIMARY KEY AUTOINCREMENT" if engine.dialect.name == "sqlite" else "BIGSERIAL PRIMARY KEY"
+        ddl = f"""
+        CREATE TABLE IF NOT EXISTS field_sync_receipts (
+            id {id_column},
+            farmer_id TEXT NOT NULL,
+            agent_id TEXT NOT NULL,
+            sync_status TEXT NOT NULL,
+            received_at TEXT NOT NULL,
+            error_message TEXT
+        )
+        """
+        with engine.begin() as conn:
+            conn.execute(text(ddl))
+    except Exception:
+        pass
+
+
+def fetch_field_sync_receipts(limit=200):
+    ensure_field_sync_receipts_table()
+    try:
+        with get_engine().connect() as conn:
+            rows = conn.execute(text("""
+                SELECT farmer_id, agent_id, sync_status, received_at, error_message
+                FROM field_sync_receipts
+                ORDER BY id DESC
+                LIMIT :limit
+            """), {"limit": int(limit)}).mappings().all()
+        return pd.DataFrame([dict(r) for r in rows])
+    except Exception:
+        return pd.DataFrame()
+
 APP_BASE_URL = os.getenv(
     "AGROW_LOCAL_BASE_URL",
     os.getenv(
@@ -711,64 +747,19 @@ def build_farmer_qr_identity_image(farmer, verification_url: str):
     draw.text((55,1020), "Scan to verify this farmer's AGROW record.", fill=(55,55,55), font=font)
     out=BytesIO(); card.save(out, format="PNG"); out.seek(0); return out
 
-COUNTRY_GPS_ENVELOPES = {
-    "Nigeria": (4.0, 14.0, 2.5, 15.0),
-    "Ghana": (4.5, 11.5, -3.5, 1.5),
-    "Kenya": (-5.0, 5.5, 33.5, 42.5),
+STATE_GPS_ENVELOPES = {
+    "Jigawa": (10.5, 13.2, 8.0, 10.7),
+    "Kano": (10.4, 12.7, 7.5, 9.7),
+    "Kaduna": (9.0, 11.8, 6.0, 9.0),
+    "FCT": (8.2, 9.4, 6.6, 7.8),
+    "Federal Capital Territory": (8.2, 9.4, 6.6, 7.8),
 }
 
-# Practical state-level envelopes for Nigeria. These are validation guards, not
-# cadastral boundaries. Production deployments can override/add any country or
-# province using AGROW_TERRITORY_BOUNDS_JSON.
-NIGERIA_STATE_ENVELOPES = {
-    "Abia": (4.6,6.1,7.0,8.3), "Adamawa": (7.0,11.0,11.2,14.0), "Akwa Ibom": (4.3,5.6,7.4,8.7),
-    "Anambra": (5.6,6.8,6.5,7.6), "Bauchi": (9.0,12.6,8.5,12.0), "Bayelsa": (4.0,5.5,5.5,6.8),
-    "Benue": (6.4,8.3,7.5,10.2), "Borno": (10.0,14.2,11.5,14.8), "Cross River": (4.3,7.1,7.6,9.6),
-    "Delta": (5.0,6.5,5.0,6.8), "Ebonyi": (5.5,6.9,7.4,8.5), "Edo": (5.6,7.6,5.0,6.9),
-    "Ekiti": (7.2,8.1,4.8,5.9), "Enugu": (5.9,7.0,6.8,7.9), "FCT": (8.2,9.4,6.6,7.8),
-    "Gombe": (9.5,11.5,10.5,12.0), "Imo": (5.0,5.9,6.6,7.5), "Jigawa": (10.5,13.2,8.0,10.7),
-    "Kaduna": (9.0,11.8,6.0,9.0), "Kano": (10.4,12.7,7.5,9.7), "Katsina": (11.0,13.4,6.8,9.3),
-    "Kebbi": (10.0,13.3,3.5,6.8), "Kogi": (6.5,8.5,5.3,7.9), "Kwara": (7.5,10.0,2.7,6.2),
-    "Lagos": (6.2,6.8,2.6,4.5), "Nasarawa": (7.0,9.5,7.5,9.7), "Niger": (8.0,11.0,3.0,7.8),
-    "Ogun": (6.2,7.9,2.6,4.8), "Ondo": (5.7,7.8,4.3,6.2), "Osun": (6.8,8.2,4.0,5.2),
-    "Oyo": (7.0,9.0,2.7,4.7), "Plateau": (8.3,10.7,8.2,10.7), "Rivers": (4.3,5.8,6.2,7.7),
-    "Sokoto": (11.5,13.8,4.0,7.2), "Taraba": (6.4,9.8,9.0,12.2), "Yobe": (10.5,13.4,9.5,13.0),
-    "Zamfara": (10.5,13.2,5.5,7.7),
-}
-
-def _territory_bounds(country, region):
-    key = f"{str(country or '').strip()}|{str(region or '').strip()}"
-    raw = os.getenv("AGROW_TERRITORY_BOUNDS_JSON", "").strip()
-    if raw:
-        try:
-            custom = json.loads(raw)
-            value = custom.get(key)
-            if isinstance(value, (list, tuple)) and len(value) == 4:
-                return tuple(float(x) for x in value)
-        except Exception:
-            pass
-    if str(country).strip().lower() == "nigeria":
-        return NIGERIA_STATE_ENVELOPES.get(str(region or '').strip())
-    return None
-
-def validate_agent_territory(country, region, latitude, longitude):
-    country = str(country or "Nigeria").strip() or "Nigeria"
-    lat, lon = float(latitude), float(longitude)
-    country_bounds = COUNTRY_GPS_ENVELOPES.get(country)
-    if country_bounds:
-        a,b,c,d = country_bounds
-        if not (a <= lat <= b and c <= lon <= d):
-            return False, f"GPS is outside the assigned country: {country}."
-    region_bounds = _territory_bounds(country, region)
-    if region_bounds is None:
-        return None, (
-            f"No strict GPS boundary is configured yet for {country} / {region}. "
-            "An administrator must configure AGROW_TERRITORY_BOUNDS_JSON before agents can submit in this territory."
-        )
-    a,b,c,d = region_bounds
-    if not (a <= lat <= b and c <= lon <= d):
-        return False, f"GPS is outside the agent's assigned territory: {country} / {region}."
-    return True, f"GPS validated inside assigned territory: {country} / {region}."
+def gps_matches_assigned_state(state_name, latitude, longitude):
+    bounds = STATE_GPS_ENVELOPES.get(str(state_name or "").strip())
+    if not bounds: return None
+    a,b,c,d = bounds
+    return a <= latitude <= b and c <= longitude <= d
 
 QR_SECRET_KEY = os.getenv("QR_SECRET_KEY", "change-this-secret-key")
 
@@ -940,35 +931,13 @@ def table_to_excel_download(df: pd.DataFrame, filename: str):
     )
 
 def is_db_available() -> bool:
-    return cached_db_available()
-
-@st.cache_data(ttl=20, show_spinner=False)
-def cached_db_available() -> bool:
     try:
+        from sqlalchemy import text
         with get_engine().connect() as conn:
             conn.execute(text("SELECT 1"))
         return True
     except Exception:
         return False
-
-@st.cache_data(ttl=20, show_spinner=False)
-def cached_farmers():
-    return fetch_farmers()
-
-@st.cache_data(ttl=15, show_spinner=False)
-def cached_market_listings(status=None):
-    return fetch_market_listings(status=status)
-
-@st.cache_data(ttl=30, show_spinner=False)
-def cached_input_products(status=None):
-    return fetch_input_products(status=status)
-
-@st.cache_data(ttl=15, show_spinner=False)
-def cached_market_enquiries():
-    return fetch_market_enquiries()
-
-def invalidate_read_caches():
-    cached_farmers.clear(); cached_market_listings.clear(); cached_input_products.clear(); cached_market_enquiries.clear(); cached_db_available.clear()
     
 def generate_farmer_qr_code(farmer_id: str):
     verification_url = f"{get_effective_app_base_url()}?farmer_id={farmer_id}"
@@ -1244,7 +1213,7 @@ def _public_listing_url(listing_id) -> str:
 
 def render_public_listing_detail(listing_id):
     """Render one public, shareable produce listing for consumers/off-takers."""
-    listings = cached_market_listings(status="AVAILABLE")
+    listings = fetch_market_listings(status="AVAILABLE")
     if listings.empty:
         st.warning("This MarketLink listing is no longer available.")
         return
@@ -1427,7 +1396,7 @@ def render_public_marketlink():
     )
 
     with produce_tab:
-        listings = cached_market_listings(status="AVAILABLE")
+        listings = fetch_market_listings(status="AVAILABLE")
         if listings.empty:
             st.info("No produce listings are available yet. Verified farmer listings will appear here.")
         else:
@@ -1514,7 +1483,7 @@ def render_public_marketlink():
                                     st.success("Enquiry recorded in AGROW. Use Contact Seller if you also want to call or message the farmer directly.")
 
     with inputs_tab:
-        products = cached_input_products(status="AVAILABLE")
+        products = fetch_input_products(status="AVAILABLE")
         if products.empty:
             st.info("No agricultural input listings are available yet.")
         else:
@@ -1572,29 +1541,10 @@ def render_public_marketlink():
             existing_cols = [c for c in display_cols if c in latest.columns]
             st.dataframe(latest[existing_cols].head(60), width="stretch", hide_index=True)
             st.caption("Field Market Price = time-stamped price captured by an authorised AGROW source at a named market.")
-
-            chart_df = latest.dropna(subset=["typical_price"]).head(30).copy()
-            if not chart_df.empty:
-                chart_df["Location"] = chart_df["market_name"].astype(str) + " · " + chart_df["state"].astype(str)
-                price_fig = px.bar(
-                    chart_df, x="Location", y="typical_price", color="commodity",
-                    hover_data=["product", "unit", "min_price", "max_price"],
-                    title="Current Typical Market Price by Location",
-                    labels={"typical_price":"Typical Price (₦)"},
-                )
-                price_fig.update_layout(paper_bgcolor="#F1F7F2", plot_bgcolor="#F8FBF8", xaxis_title="Market / State")
-                st.plotly_chart(price_fig, width="stretch")
-
-                range_df = chart_df[["commodity","product","Location","unit","min_price","typical_price","max_price"]].copy()
-                range_df["Price Expectation"] = range_df.apply(
-                    lambda r: f"₦{float(r['min_price'] or r['typical_price']):,.0f} – ₦{float(r['max_price'] or r['typical_price']):,.0f} / {r['unit']}", axis=1
-                )
-                st.markdown("##### 📈 Price Expectation Range")
-                st.dataframe(range_df[["commodity","product","Location","Price Expectation"]], width="stretch", hide_index=True)
         else:
             st.info("No verified field market-price reports have been submitted yet.")
 
-        listings = cached_market_listings(status="AVAILABLE")
+        listings = fetch_market_listings(status="AVAILABLE")
         st.markdown("#### 🌾 AGROW Seller Listing Prices")
         if listings.empty:
             st.info("Seller price statistics will populate automatically as produce listings are published.")
@@ -1617,63 +1567,30 @@ def render_public_marketlink():
             st.caption("AGROW Seller Listing Price = current asking prices from active MarketLink listings; it is not the same as a completed trade or official exchange benchmark.")
 
 
-def seed_marketlink_presentation_data(user_id="ADMIN"):
-    """Insert clearly labelled sample records only when matching DEMO rows do not exist."""
-    inputs = [
-        ("[DEMO] GreenFields Agro Supplies", "08030000001", "Animal Feed", "Broiler Starter Feed", "Poultry", 120, "bag", 28500, "FCT", "Gwagwalada", "DEMO DATA · 25kg starter feed for broilers."),
-        ("[DEMO] VetCare Agro", "08030000002", "Veterinary", "Poultry Multivitamin", "Poultry", 80, "unit", 6500, "FCT", "Abaji", "DEMO DATA · Poultry vitamin/mineral supplement."),
-        ("[DEMO] Northern Inputs Hub", "08030000003", "Fertilizer", "NPK 15-15-15", "Maize, Rice", 300, "bag", 52000, "Kaduna", "Chikun", "DEMO DATA · 50kg NPK fertilizer."),
-        ("[DEMO] Kano Farm Inputs", "08030000004", "Fertilizer", "Urea 46%", "Rice, Maize", 250, "bag", 48000, "Kano", "Nassarawa", "DEMO DATA · 50kg urea fertilizer."),
-        ("[DEMO] SeedLink Nigeria", "08030000005", "Seeds & Planting Materials", "Certified Maize Seed", "Maize", 90, "bag", 18000, "Kaduna", "Igabi", "DEMO DATA · Certified maize seed for presentation."),
-        ("[DEMO] RiceGrow Inputs", "08030000006", "Seeds & Planting Materials", "Certified Rice Seed", "Rice", 110, "bag", 22000, "Jigawa", "Dutse", "DEMO DATA · Certified rice seed for presentation."),
-    ]
-    existing = cached_input_products()
-    existing_names = set(existing.get("supplier_name", pd.Series(dtype=str)).astype(str).tolist()) if not existing.empty else set()
-    for row in inputs:
-        if row[0] not in existing_names:
-            create_input_product(supplier_name=row[0], supplier_phone=row[1], category=row[2], product_name=row[3],
-                applicable_commodities=row[4], quantity=row[5], unit=row[6], price=row[7], state=row[8], lga=row[9],
-                description=row[10], created_by=user_id)
-    reports = fetch_market_price_reports()
-    if reports.empty or not reports.get("source_name", pd.Series(dtype=str)).astype(str).str.contains("DEMO", na=False).any():
-        demo_prices = [
-            dict(commodity="Maize",product="Yellow Maize",market_name="Abaji Market",lga="Abaji",state="FCT",unit="bag",farmgate_price=56000,wholesale_price=59000,retail_price=63000,min_price=55000,max_price=65000,typical_price=60000,source_type="AGROW Field Enumerator",source_name="[DEMO] Abaji Market Survey",notes="DEMO / SAMPLE MARKET DATA",reported_by=user_id),
-            dict(commodity="Rice",product="Paddy Rice",market_name="Dutse Market",lga="Dutse",state="Jigawa",unit="bag",farmgate_price=68000,wholesale_price=72000,retail_price=76000,min_price=67000,max_price=78000,typical_price=72500,source_type="AGROW Field Enumerator",source_name="[DEMO] Dutse Market Survey",notes="DEMO / SAMPLE MARKET DATA",reported_by=user_id),
-            dict(commodity="Poultry",product="Broiler Chicken",market_name="Gwagwalada Market",lga="Gwagwalada",state="FCT",unit="bird",farmgate_price=8500,wholesale_price=9300,retail_price=10500,min_price=8200,max_price=11000,typical_price=9500,source_type="AGROW Field Enumerator",source_name="[DEMO] Gwagwalada Poultry Survey",notes="DEMO / SAMPLE MARKET DATA",reported_by=user_id),
-        ]
-        for payload in demo_prices: save_market_price_report(**payload)
-    invalidate_read_caches()
-
-
 def render_marketlink_workspace(df: pd.DataFrame, role: str, user_id: str):
     st.markdown("## 🛒 AGROW MarketLink")
     st.caption(
         "Universal agricultural marketplace connecting verified farmers to consumers, off-takers and input suppliers. "
         "Poultry is the first demonstration commodity; no additional feature build is required for maize, rice, soybean or other commodities."
     )
-    if role == "admin":
-        if st.button("🧪 Load Sample MarketLink Presentation Data", key="seed_market_demo", type="secondary"):
-            seed_marketlink_presentation_data(user_id)
-            st.success("Sample agricultural inputs and market-price records loaded. All sample records are labelled DEMO.")
-            st.rerun()
 
-    listings = cached_market_listings()
+    listings = fetch_market_listings()
     available = listings[listings["status"] == "AVAILABLE"] if not listings.empty else listings
-    input_products = cached_input_products()
+    input_products = fetch_input_products()
     available_inputs = input_products[input_products["status"] == "AVAILABLE"] if not input_products.empty else input_products
 
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("Available Produce Listings", len(available))
     m2.metric("Commodities Listed", available["commodity"].nunique() if not available.empty else 0)
     m3.metric("Input Products", len(available_inputs))
-    m4.metric("Buyer Enquiries", len(cached_market_enquiries()))
+    m4.metric("Buyer Enquiries", len(fetch_market_enquiries()))
 
     sell_tab, browse_tab, input_tab, price_report_tab, manage_tab = st.tabs(
         [
             "➕ Create Produce Listing",
             "🌾 Browse Market",
             "🧰 Input Marketplace",
-            "📊 Report Market Price",
+            "📍 Report Market Price",
             "📋 Manage",
         ]
     )
@@ -1732,7 +1649,6 @@ def render_marketlink_workspace(df: pd.DataFrame, role: str, user_id: str):
                             created_by=user_id,
                         )
                         log_action(user_id, "MARKET_LISTING_CREATED", f"{farmer['farmer_id']} | {commodity} | {product}")
-                        invalidate_read_caches()
                         st.success("Produce listing published to AGROW MarketLink.")
                         st.rerun()
 
@@ -1778,7 +1694,6 @@ def render_marketlink_workspace(df: pd.DataFrame, role: str, user_id: str):
                         created_by=user_id,
                     )
                     log_action(user_id, "INPUT_PRODUCT_CREATED", f"{supplier_name} | {product_name}")
-                    invalidate_read_caches()
                     st.success("Agricultural input published to MarketLink.")
                     st.rerun()
 
@@ -1821,12 +1736,11 @@ def render_marketlink_workspace(df: pd.DataFrame, role: str, user_id: str):
                         reported_by=user_id,
                     )
                     log_action(user_id, "MARKET_PRICE_REPORTED", f"{rp_commodity} | {rp_market} | {rp_typical}")
-                    invalidate_read_caches()
                     st.success("Market price published to the AGROW public Price Board.")
 
     with manage_tab:
         st.markdown("### Produce Listings")
-        current = cached_market_listings()
+        current = fetch_market_listings()
         if role == "agent" and not current.empty:
             # Agents manage only listings they created; administrators retain platform-wide oversight.
             current = current[current["created_by"] == user_id]
@@ -1851,14 +1765,14 @@ def render_marketlink_workspace(df: pd.DataFrame, role: str, user_id: str):
 
         if role == "admin":
             st.markdown("### Buyer Enquiries")
-            enquiries = cached_market_enquiries()
+            enquiries = fetch_market_enquiries()
             if enquiries.empty:
                 st.info("No buyer enquiries yet.")
             else:
                 st.dataframe(enquiries, width="stretch", hide_index=True)
 
             st.markdown("### Input Listings")
-            products = cached_input_products()
+            products = fetch_input_products()
             if products.empty:
                 st.info("No input products listed yet.")
             else:
@@ -1881,7 +1795,7 @@ def _farmer_record_by_id(farmer_id: str):
     farmer_id = str(farmer_id or "").strip().upper()
     if not farmer_id:
         return None
-    farmers = cached_farmers()
+    farmers = fetch_farmers()
     if farmers.empty or "farmer_id" not in farmers.columns:
         return None
     match = farmers[
@@ -2112,10 +2026,10 @@ def render_farmer_market_portal(farmer_id: str) -> None:
         st.write(f"**Primary enterprise:** {farmer.get('primary_crop') or '-'}")
         st.success("✅ Verified agricultural profile")
 
-    listings = cached_market_listings()
+    listings = fetch_market_listings()
     mine = listings[listings["farmer_id"].astype(str).str.upper() == farmer_id] if not listings.empty else listings
     active_mine = mine[mine["status"] == "AVAILABLE"] if not mine.empty else mine
-    enquiries = cached_market_enquiries()
+    enquiries = fetch_market_enquiries()
     my_enquiries = enquiries[enquiries["farmer_id"].astype(str).str.upper() == farmer_id] if not enquiries.empty else enquiries
 
     m1, m2, m3 = st.columns(3)
@@ -2168,7 +2082,6 @@ def render_farmer_market_portal(farmer_id: str) -> None:
                         created_by=farmer_id,
                     )
                     log_action(farmer_id, "FARMER_SELF_LISTING_CREATED", f"{commodity} | {product.strip()}")
-                    invalidate_read_caches()
                     st.success("Your produce is now published on AGROW MarketLink.")
                     st.rerun()
 
@@ -2199,7 +2112,7 @@ def render_farmer_market_portal(farmer_id: str) -> None:
                             st.rerun()
 
     with prices_tab:
-        current = cached_market_listings(status="AVAILABLE")
+        current = fetch_market_listings(status="AVAILABLE")
         if current.empty:
             st.info("The market price board will populate as produce listings are published.")
         else:
@@ -2225,7 +2138,7 @@ def render_farmer_market_portal(farmer_id: str) -> None:
             st.caption("MarketLink prices reflect current seller listings and are not an official commodity exchange benchmark.")
 
     with inputs_tab:
-        products = cached_input_products(status="AVAILABLE")
+        products = fetch_input_products(status="AVAILABLE")
         if products.empty:
             st.info("No agricultural input products are listed yet.")
         else:
@@ -2387,23 +2300,14 @@ def show_auth():
         nin = st.text_input("NIN", max_chars=11, key="signup_nin")
         email = st.text_input("Email Address", key="signup_email")
 
-        country = st.selectbox("Country of Assignment", ["Nigeria", "Ghana", "Kenya"], key="signup_country")
         state_options = sorted(list(NIGERIA_LGA_MAP.keys()))
-        if country == "Nigeria":
-            state = st.selectbox("State / Province of Coverage", state_options, key="signup_state")
-            lga_options = NIGERIA_LGA_MAP.get(state, [])
-            lga_coverage = st.selectbox(
-                "LGA / District of Coverage",
-                lga_options if lga_options else ["N/A"],
-                key="signup_lga",
-            )
-        else:
-            state = st.text_input("State / Province / Region of Coverage", key="signup_state")
-            lga_coverage = st.text_input("District / County / Local Area", key="signup_lga")
-            st.caption(
-                "International territories require an administrator-defined GPS boundary in "
-                "AGROW_TERRITORY_BOUNDS_JSON before field submissions are accepted."
-            )
+        state = st.selectbox("State of Coverage", state_options, key="signup_state")
+        lga_options = NIGERIA_LGA_MAP.get(state, [])
+        lga_coverage = st.selectbox(
+            "LGA of Coverage",
+            lga_options if lga_options else ["N/A"],
+            key="signup_lga",
+        )
 
         password = st.text_input("Create Password", type="password", key="signup_password")
         confirm_password = st.text_input("Confirm Password", type="password", key="signup_confirm_password")
@@ -2443,13 +2347,13 @@ def show_auth():
             else:
                 agent_id = preview_id
                 clean_password = password.strip()
-                insert_user(agent_id, clean_password, "agent", full_name, phone, nin, state, lga_coverage, email, country=country)
+                insert_user(agent_id, clean_password, "agent", full_name, phone, nin, state, lga_coverage, email)
                 saved_user = fetch_user(agent_id)
                 if not saved_user or str(saved_user["pw"]).strip() != clean_password:
                     st.error("The account could not be verified after registration. Please try again.")
                     st.stop()
                 save_uploaded_photo(signup_photo, str(AGENT_PHOTO_DIR), f"{agent_id}.png")
-                log_action(agent_id, "AGENT_CREATED", f"{country} / {state} / {lga_coverage}")
+                log_action(agent_id, "AGENT_CREATED", f"{state} / {lga_coverage}")
 
                 st.session_state["prefill_login_username"] = agent_id
                 st.session_state["last_created_agent_id"] = agent_id
@@ -2460,7 +2364,6 @@ def show_auth():
                     "signup_phone",
                     "signup_nin",
                     "signup_email",
-                    "signup_country",
                     "signup_state",
                     "signup_lga",
                     "signup_password",
@@ -2562,7 +2465,7 @@ def show_public_farmer_verification(compact=False, key_prefix="public"):
             st.warning("Enter Farmer ID or Phone Number.")
             return
 
-    df = cached_farmers()
+    df = fetch_farmers()
 
     if df.empty:
         st.warning("No farmer records available.")
@@ -2680,6 +2583,13 @@ else:
      show_auth()
      st.stop()
 
+    def is_db_available():
+        try:
+            conn = get_connection()
+            conn.close()
+            return True
+        except Exception:
+            return False
 
     logo_path = get_logo_path()
 
@@ -2729,8 +2639,7 @@ else:
     st.sidebar.write(f"**Role:** {(role or 'Guest').title()}")
 
     if role == "agent":
-        st.sidebar.write(f"**Country:** {user_meta.get('country', 'Nigeria')}")
-        st.sidebar.write(f"**Coverage State / Province:** {normalize_state_name(user_meta.get('state', '-'))}")
+        st.sidebar.write(f"**Coverage State:** {normalize_state_name(user_meta.get('state', '-'))}")
         st.sidebar.write(f"**Coverage LGA:** {user_meta.get('lga_coverage', '-')}")
 
     if st.sidebar.button("Logout", width="stretch"):
@@ -2789,7 +2698,7 @@ else:
     st.caption("Powered by DataDev Limited | Agricultural Value-Chain Infrastructure")
 
     if is_db_available():
-        st.success("🟢 ONLINE MODE: Central database connected")
+        st.success("🟢 ONLINE MODE: Data syncing to central database")
     else:
         st.warning("🟡 OFFLINE MODE: Data stored locally and will sync later")
 
@@ -2820,7 +2729,7 @@ else:
     # -------------------------
     # Dashboard data
     # -------------------------
-    df = cached_farmers()
+    df = fetch_farmers()
 
     if selected_state != "All Nigeria" and not df.empty:
         df = df[df["state"] == selected_state]
@@ -2971,21 +2880,44 @@ else:
 
         st.divider()
 
-        st.markdown("### Offline Queue Monitor")
-        queue_df = fetch_offline_queue()
+        st.markdown("### Central Sync Monitor")
+        st.caption(
+            "A field device's unsynced PENDING records remain on that phone/tablet and are not visible centrally. "
+            "When AGROW Field reconnects and sends them, this workspace records the server receipt automatically."
+        )
 
+        receipts_df = fetch_field_sync_receipts()
+        received_count = len(receipts_df[receipts_df["sync_status"] == "SYNCED"]) if not receipts_df.empty else 0
+        field_failed_count = len(receipts_df[receipts_df["sync_status"] == "FAILED"]) if not receipts_df.empty else 0
+        last_received = "—"
+        if not receipts_df.empty and "received_at" in receipts_df.columns:
+            last_received = str(receipts_df.iloc[0]["received_at"] or "—")
+
+        q1, q2, q3 = st.columns(3)
+        q1.metric("Field Records Received", received_count)
+        q2.metric("Field Sync Failed", field_failed_count)
+        q3.metric("Last Device Receipt", last_received)
+
+        if not receipts_df.empty:
+            st.dataframe(receipts_df.head(50), width="stretch")
+        else:
+            st.info("No AGROW Field device sync receipts have reached the central database yet.")
+
+        st.markdown("#### Main Workspace Local Queue")
+        st.caption("This queue belongs only to submissions created by the Streamlit workspace itself; it does not pull records from phones.")
+        queue_df = fetch_offline_queue()
         pending_count = len(queue_df[queue_df["sync_status"] == "PENDING"]) if not queue_df.empty else 0
         failed_count = len(queue_df[queue_df["sync_status"] == "FAILED"]) if not queue_df.empty else 0
         synced_count = len(queue_df[queue_df["sync_status"] == "SYNCED"]) if not queue_df.empty else 0
 
-        q1, q2, q3 = st.columns(3)
-        q1.metric("Pending", pending_count)
-        q2.metric("Synced", synced_count)
-        q3.metric("Failed", failed_count)
+        l1, l2, l3 = st.columns(3)
+        l1.metric("Pending", pending_count)
+        l2.metric("Synced", synced_count)
+        l3.metric("Failed", failed_count)
 
-        if st.button("Sync Pending Records", width="stretch"):
+        if st.button("Sync Main Workspace Queue", width="stretch"):
             synced, failed = sync_offline_queue()
-            st.success(f"{synced} synced")
+            st.success(f"{synced} main-workspace record(s) synced")
             if failed:
                 st.warning(f"{failed} failed")
             st.rerun()
@@ -2993,7 +2925,7 @@ else:
         if not queue_df.empty:
             st.dataframe(queue_df, width="stretch")
         else:
-            st.info("No queue records")
+            st.info("No main-workspace queue records")
 
     # =========================================================
     # TAB 2: REGISTER FARMER
@@ -3054,25 +2986,15 @@ else:
 
         st.markdown("---")
         st.markdown("### Section 3: Coverage and Location")
-        assigned_country = str(user_meta.get("country") or "Nigeria")
         if role == "admin":
-            farmer_country = st.selectbox("Country", ["Nigeria", "Ghana", "Kenya"], key=f"farmer_country_{form_v}")
-        else:
-            farmer_country = assigned_country
-            st.text_input("Country", value=farmer_country, disabled=True, key=f"farmer_country_display_{form_v}")
-        if farmer_country != "Nigeria":
-            st.warning("International pilot territory requires administrator-configured regional GPS bounds before agent submission.")
-        if role == "admin":
-            farmer_state = (st.selectbox("State / Province / Region", state_options, key=f"farmer_state_{form_v}")
-                            if farmer_country == "Nigeria" else st.text_input("State / Province / Region", key=f"farmer_state_{form_v}"))
+            farmer_state = st.selectbox("State", state_options, key=f"farmer_state_{form_v}")
         else:
             farmer_state = user_meta.get("state", "")
             st.text_input("State", value=farmer_state, disabled=True, key=f"farmer_state_display_{form_v}")
 
-        lga_list = NIGERIA_LGA_MAP.get(farmer_state, []) if farmer_country == "Nigeria" else []
+        lga_list = NIGERIA_LGA_MAP.get(farmer_state, [])
         if role == "admin":
-            farmer_lga = (st.selectbox("LGA / District", lga_list, key=f"farmer_lga_{form_v}") if lga_list
-                          else st.text_input("LGA / District", key=f"farmer_lga_{form_v}"))
+            farmer_lga = st.selectbox("LGA", lga_list if lga_list else ["N/A"], key=f"farmer_lga_{form_v}")
         else:
             assigned_lga = user_meta.get("lga_coverage", "")
             farmer_lga = assigned_lga if assigned_lga in lga_list or assigned_lga else (lga_list[0] if lga_list else "N/A")
@@ -3164,13 +3086,13 @@ else:
             longitude = st.number_input("Longitude", format="%.6f", key=lon_key)
 
         if role == "agent" and latitude and longitude:
-            geofence_result, territory_message = validate_agent_territory(farmer_country, farmer_state, float(latitude), float(longitude))
+            geofence_result = gps_matches_assigned_state(farmer_state, float(latitude), float(longitude))
             if geofence_result is False:
-                st.error(territory_message)
+                st.error(f"GPS is outside the broad {normalize_state_name(farmer_state)} operating envelope.")
             elif geofence_result is True:
-                st.success(territory_message)
+                st.success(f"GPS is consistent with the assigned state: {normalize_state_name(farmer_state)}.")
             else:
-                st.warning(territory_message)
+                st.info("State and LGA are locked to the agent assignment. Precise boundary validation requires official GIS polygons.")
 
         st.markdown("---")
         st.markdown("### Section 9: Farmer Photo Capture")
@@ -3210,8 +3132,8 @@ else:
                 st.error("Farmer photo capture is required.")
             elif latitude == 0.0 and longitude == 0.0:
                 st.error("Capture the farm GPS location before submission. Allow browser location access and try again.")
-            elif role == "agent" and validate_agent_territory(farmer_country, farmer_state, float(latitude), float(longitude))[0] is not True:
-                st.error("Submission blocked: GPS must validate inside the agent's assigned country and state/province territory.")
+            elif role == "agent" and gps_matches_assigned_state(farmer_state, float(latitude), float(longitude)) is False:
+                st.error("Submission blocked: GPS is outside the agent's assigned-state operating envelope.")
             elif not record_confirmed:
                 st.error("Please confirm that the farmer's information has been reviewed before submission.")
             elif farmer_exists_today(phone_number, nin, farmer_full_name):
@@ -3244,7 +3166,6 @@ else:
                     "Alternate_Phone": alternate_phone,
                     "Email_Address": email_address,
                     "NIN": nin,
-                    "Country": farmer_country,
                     "State": farmer_state,
                     "LGA": farmer_lga,
                     "Ward": ward,
@@ -3260,9 +3181,6 @@ else:
                     "ID_Number": id_number,
                     "Latitude": latitude,
                     "Longitude": longitude,
-                    "GPS_Accuracy": st.session_state.get(accuracy_key),
-                    "Territory_Status": "VALIDATED" if role != "agent" or validate_agent_territory(farmer_country, farmer_state, float(latitude), float(longitude))[0] is True else "REVIEW",
-                    "GPS_Validated_At": now.strftime("%Y-%m-%d %H:%M:%S"),
                     "Enumerator_Remarks": remarks,
                     "Photo_Path": photo_path,
                     "Photo_Status": "Captured" if photo_path else "No Photo",
@@ -3270,7 +3188,6 @@ else:
 
                 if is_db_available():
                     insert_farmer(row)
-                    invalidate_read_caches()
                     log_action(user_id, "FARMER_REGISTERED", farmer_id)
                     success_text = "✅ Farmer record saved directly to the main database."
                 else:

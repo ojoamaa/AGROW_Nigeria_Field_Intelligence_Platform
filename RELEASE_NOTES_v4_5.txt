@@ -1,0 +1,10 @@
+AGROW v4.5 Sync Bridge
+- Preserves offline IndexedDB farmer storage.
+- Adds automatic sync attempt when connectivity returns.
+- Retains manual Sync Pending Records for retry/control.
+- Adds SYNCING status between PENDING and final result.
+- FAILED records keep a readable error and remain retryable.
+- Adds central field_sync_receipts audit table.
+- Main dashboard distinguishes server receipts from the Streamlit app's own local queue.
+- No longer implies that the central server can see unsent phone records.
+- Existing live camera, GPS validation, territory enforcement and offline PWA behavior retained.

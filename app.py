@@ -30,8 +30,6 @@ from services.farmer_service import (
     farmer_exists_today,
     insert_farmer,
     save_to_offline_queue,
-    fetch_offline_queue,
-    sync_offline_queue,
 )
 from services.user_service import (
     fetch_user,
@@ -2882,50 +2880,248 @@ else:
 
         st.markdown("### Central Sync Monitor")
         st.caption(
-            "A field device's unsynced PENDING records remain on that phone/tablet and are not visible centrally. "
-            "When AGROW Field reconnects and sends them, this workspace records the server receipt automatically."
+            "This monitor is an operational audit trail of AGROW Field device transmissions. "
+            "Sync receipts are cumulative and may include more than one receipt for the same farmer. "
+            "The Farmer Register remains the authoritative source for unique farmer registrations and registration dates."
         )
 
         receipts_df = fetch_field_sync_receipts()
-        received_count = len(receipts_df[receipts_df["sync_status"] == "SYNCED"]) if not receipts_df.empty else 0
-        field_failed_count = len(receipts_df[receipts_df["sync_status"] == "FAILED"]) if not receipts_df.empty else 0
-        last_received = "—"
-        if not receipts_df.empty and "received_at" in receipts_df.columns:
-            last_received = str(receipts_df.iloc[0]["received_at"] or "—")
 
-        q1, q2, q3 = st.columns(3)
-        q1.metric("Field Records Received", received_count)
-        q2.metric("Field Sync Failed", field_failed_count)
-        q3.metric("Last Device Receipt", last_received)
+        total_sync_receipts = 0
+        unique_farmers_synced = 0
+        synced_today = 0
+        field_failed_count = 0
+        last_received = "—"
 
         if not receipts_df.empty:
-            st.dataframe(receipts_df.head(50), width="stretch")
+            receipts_work = receipts_df.copy()
+            receipts_work["received_at_dt"] = pd.to_datetime(
+                receipts_work.get("received_at"),
+                errors="coerce"
+            )
+
+            synced_mask = receipts_work["sync_status"].astype(str).str.upper().eq("SYNCED")
+            failed_mask = receipts_work["sync_status"].astype(str).str.upper().eq("FAILED")
+
+            total_sync_receipts = int(synced_mask.sum())
+            field_failed_count = int(failed_mask.sum())
+
+            if "farmer_id" in receipts_work.columns:
+                unique_farmers_synced = int(
+                    receipts_work.loc[synced_mask, "farmer_id"]
+                    .dropna()
+                    .astype(str)
+                    .replace("", pd.NA)
+                    .dropna()
+                    .nunique()
+                )
+
+            today_date = pd.Timestamp.now().date()
+            synced_today = int(
+                (
+                    synced_mask
+                    & receipts_work["received_at_dt"].dt.date.eq(today_date)
+                ).sum()
+            )
+
+            if "received_at" in receipts_work.columns:
+                last_received = str(receipts_work.iloc[0]["received_at"] or "—")
+
+        q1, q2, q3, q4 = st.columns(4)
+        q1.metric("Total Sync Receipts", total_sync_receipts)
+        q2.metric("Unique Farmers Synced", unique_farmers_synced)
+        q3.metric("Synced Today", synced_today)
+        q4.metric("Failed Syncs", field_failed_count)
+
+        st.metric("Last Device Receipt", last_received)
+
+        if not receipts_df.empty:
+            display_receipts = receipts_df.copy()
+            st.dataframe(display_receipts.head(50), width="stretch")
         else:
             st.info("No AGROW Field device sync receipts have reached the central database yet.")
 
-        st.markdown("#### Main Workspace Local Queue")
-        st.caption("This queue belongs only to submissions created by the Streamlit workspace itself; it does not pull records from phones.")
-        queue_df = fetch_offline_queue()
-        pending_count = len(queue_df[queue_df["sync_status"] == "PENDING"]) if not queue_df.empty else 0
-        failed_count = len(queue_df[queue_df["sync_status"] == "FAILED"]) if not queue_df.empty else 0
-        synced_count = len(queue_df[queue_df["sync_status"] == "SYNCED"]) if not queue_df.empty else 0
+        st.markdown("#### Agent / Enumerator Performance")
+        st.caption(
+            "Registration counts come from the authoritative Farmer Register. "
+            "Sync metrics come from the device receipt audit trail, so repeated transmissions do not inflate unique farmer counts."
+        )
 
-        l1, l2, l3 = st.columns(3)
-        l1.metric("Pending", pending_count)
-        l2.metric("Synced", synced_count)
-        l3.metric("Failed", failed_count)
+        receipt_perf = pd.DataFrame()
+        register_perf = pd.DataFrame()
 
-        if st.button("Sync Main Workspace Queue", width="stretch"):
-            synced, failed = sync_offline_queue()
-            st.success(f"{synced} main-workspace record(s) synced")
-            if failed:
-                st.warning(f"{failed} failed")
-            st.rerun()
+        if not receipts_df.empty:
+            rp = receipts_df.copy()
+            rp["received_at_dt"] = pd.to_datetime(rp.get("received_at"), errors="coerce")
+            rp["sync_status_norm"] = rp["sync_status"].astype(str).str.upper()
+            today_date = pd.Timestamp.now().date()
 
-        if not queue_df.empty:
-            st.dataframe(queue_df, width="stretch")
+            receipt_perf = (
+                rp.groupby("agent_id", dropna=False)
+                .agg(
+                    total_sync_receipts=("sync_status_norm", lambda s: int((s == "SYNCED").sum())),
+                    failed_syncs=("sync_status_norm", lambda s: int((s == "FAILED").sum())),
+                    last_activity=("received_at_dt", "max"),
+                )
+                .reset_index()
+            )
+
+            unique_perf = (
+                rp[rp["sync_status_norm"].eq("SYNCED")]
+                .groupby("agent_id", dropna=False)["farmer_id"]
+                .nunique()
+                .rename("unique_farmers_synced")
+                .reset_index()
+            )
+
+            today_perf = (
+                rp[
+                    rp["sync_status_norm"].eq("SYNCED")
+                    & rp["received_at_dt"].dt.date.eq(today_date)
+                ]
+                .groupby("agent_id", dropna=False)
+                .size()
+                .rename("synced_today")
+                .reset_index()
+            )
+
+            receipt_perf = receipt_perf.merge(unique_perf, on="agent_id", how="left")
+            receipt_perf = receipt_perf.merge(today_perf, on="agent_id", how="left")
+
+        if not df.empty and "agent_id" in df.columns:
+            reg = df.copy()
+            reg["registration_date_dt"] = pd.to_datetime(
+                reg.get("registration_date"),
+                errors="coerce"
+            )
+            today_date = pd.Timestamp.now().date()
+
+            register_perf = (
+                reg.groupby("agent_id", dropna=False)
+                .agg(
+                    registered_farmers=("farmer_id", "nunique"),
+                    last_registration=("registration_date_dt", "max"),
+                )
+                .reset_index()
+            )
+
+            registered_today = (
+                reg[reg["registration_date_dt"].dt.date.eq(today_date)]
+                .groupby("agent_id", dropna=False)["farmer_id"]
+                .nunique()
+                .rename("registered_today")
+                .reset_index()
+            )
+
+            register_perf = register_perf.merge(
+                registered_today,
+                on="agent_id",
+                how="left"
+            )
+
+        if not receipt_perf.empty and not register_perf.empty:
+            agent_perf = receipt_perf.merge(register_perf, on="agent_id", how="outer")
+        elif not receipt_perf.empty:
+            agent_perf = receipt_perf.copy()
         else:
-            st.info("No main-workspace queue records")
+            agent_perf = register_perf.copy()
+
+        if not agent_perf.empty:
+            numeric_cols = [
+                "total_sync_receipts",
+                "unique_farmers_synced",
+                "synced_today",
+                "failed_syncs",
+                "registered_farmers",
+                "registered_today",
+            ]
+            for col in numeric_cols:
+                if col not in agent_perf.columns:
+                    agent_perf[col] = 0
+                agent_perf[col] = agent_perf[col].fillna(0).astype(int)
+
+            for col in ["last_activity", "last_registration"]:
+                if col not in agent_perf.columns:
+                    agent_perf[col] = pd.NaT
+
+            agent_perf = agent_perf[
+                [
+                    "agent_id",
+                    "registered_farmers",
+                    "registered_today",
+                    "unique_farmers_synced",
+                    "synced_today",
+                    "total_sync_receipts",
+                    "failed_syncs",
+                    "last_registration",
+                    "last_activity",
+                ]
+            ].sort_values(
+                by=["registered_today", "registered_farmers", "unique_farmers_synced"],
+                ascending=False
+            )
+
+            st.dataframe(agent_perf, width="stretch")
+        else:
+            st.info("No agent performance data is available yet.")
+
+        st.markdown("#### Field Operations Summary")
+        st.caption(
+            "Pitch view for the signed-in field user. Registration figures come from the Farmer Register; "
+            "mobile synchronization figures come from the AGROW Field device receipt trail. "
+            "The Streamlit fallback queue remains a backend diagnostic and is intentionally hidden here."
+        )
+
+        current_agent_registered = 0
+        current_agent_registered_today = 0
+        current_agent_unique_synced = 0
+        current_agent_synced_today = 0
+        current_agent_failed = 0
+        current_agent_last_activity = "—"
+
+        if not agent_perf.empty and "agent_id" in agent_perf.columns:
+            current_agent_row = agent_perf[
+                agent_perf["agent_id"].astype(str).str.upper()
+                == str(user_id).upper()
+            ]
+
+            if not current_agent_row.empty:
+                current_agent_registered = int(
+                    current_agent_row.iloc[0].get("registered_farmers", 0) or 0
+                )
+                current_agent_registered_today = int(
+                    current_agent_row.iloc[0].get("registered_today", 0) or 0
+                )
+                current_agent_unique_synced = int(
+                    current_agent_row.iloc[0].get("unique_farmers_synced", 0) or 0
+                )
+                current_agent_synced_today = int(
+                    current_agent_row.iloc[0].get("synced_today", 0) or 0
+                )
+                current_agent_failed = int(
+                    current_agent_row.iloc[0].get("failed_syncs", 0) or 0
+                )
+
+                last_activity_value = current_agent_row.iloc[0].get("last_activity", pd.NaT)
+                if pd.notna(last_activity_value):
+                    current_agent_last_activity = str(last_activity_value)
+
+        f1, f2, f3 = st.columns(3)
+        f1.metric("My Registered Farmers", current_agent_registered)
+        f2.metric("My Registered Today", current_agent_registered_today)
+        f3.metric("My Unique Mobile Syncs", current_agent_unique_synced)
+
+        f4, f5, f6 = st.columns(3)
+        f4.metric("My Syncs Today", current_agent_synced_today)
+        f5.metric("My Failed Syncs", current_agent_failed)
+        f6.metric("My Last Mobile Activity", current_agent_last_activity)
+
+        if current_agent_failed == 0:
+            st.success("AGROW Field mobile sync health: no failed syncs recorded for this field user.")
+        else:
+            st.warning(
+                f"AGROW Field mobile sync health: {current_agent_failed} failed sync(s) require review."
+            )
 
     # =========================================================
     # TAB 2: REGISTER FARMER

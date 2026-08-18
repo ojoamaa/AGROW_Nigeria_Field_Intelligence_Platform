@@ -59,11 +59,12 @@ def auth(authorization: Optional[str]):
     except Exception: raise HTTPException(401,'Invalid or expired token')
 
 def ensure_sync_receipts_table():
-    """Server-side audit trail for Field-device synchronization.
+    """Server-side audit trail for AGROW Field synchronization.
 
-    Device-local PENDING records are intentionally invisible to the central
-    AGROW server until the device reconnects. Once a sync attempt reaches this
-    API, the receipt is recorded here for central monitoring.
+    Successful sync is idempotent per farmer + agent. Historical duplicate
+    successful receipts are collapsed once, then a database-level unique index
+    prevents the same farmer from being counted again on retry/reconnect.
+    Failed attempts may still be retained for diagnostics.
     """
     engine = get_engine()
     id_column = "INTEGER PRIMARY KEY AUTOINCREMENT" if engine.dialect.name == "sqlite" else "BIGSERIAL PRIMARY KEY"
@@ -80,10 +81,49 @@ def ensure_sync_receipts_table():
     with engine.begin() as conn:
         conn.execute(text(ddl))
 
+        # Repair historical duplicate successful receipts while preserving the
+        # first server receipt for each farmer/agent pair.
+        conn.execute(text("""
+            DELETE FROM field_sync_receipts
+            WHERE UPPER(sync_status) = 'SYNCED'
+              AND id NOT IN (
+                    SELECT MIN(id)
+                    FROM field_sync_receipts
+                    WHERE UPPER(sync_status) = 'SYNCED'
+                    GROUP BY farmer_id, agent_id
+              )
+        """))
 
-def record_sync_receipt(farmer_id: str, agent_id: str, status: str, error: str = ""):
+        # Enforce idempotency at database level so app retries cannot recreate
+        # the duplicate even if two requests arrive very close together.
+        conn.execute(text("""
+            CREATE UNIQUE INDEX IF NOT EXISTS ux_field_sync_success
+            ON field_sync_receipts (farmer_id, agent_id)
+            WHERE UPPER(sync_status) = 'SYNCED'
+        """))
+
+
+def record_sync_receipt(farmer_id: str, agent_id: str, status: str, error: str = "") -> bool:
+    """Record a sync attempt. Returns True only when a new receipt is written."""
     ensure_sync_receipts_table()
+    status_norm = str(status or '').strip().upper()
+
     with get_engine().begin() as conn:
+        if status_norm == 'SYNCED':
+            existing = conn.execute(
+                text("""
+                    SELECT 1
+                    FROM field_sync_receipts
+                    WHERE farmer_id = :farmer_id
+                      AND agent_id = :agent_id
+                      AND UPPER(sync_status) = 'SYNCED'
+                    LIMIT 1
+                """),
+                {"farmer_id": farmer_id, "agent_id": agent_id},
+            ).first()
+            if existing:
+                return False
+
         conn.execute(
             text("""
                 INSERT INTO field_sync_receipts
@@ -93,11 +133,12 @@ def record_sync_receipt(farmer_id: str, agent_id: str, status: str, error: str =
             {
                 "farmer_id": farmer_id,
                 "agent_id": agent_id,
-                "sync_status": status,
+                "sync_status": status_norm,
                 "received_at": time.strftime("%Y-%m-%d %H:%M:%S"),
                 "error_message": error[:500] if error else None,
             },
         )
+    return True
 
 
 ensure_sync_receipts_table()
@@ -177,8 +218,13 @@ def sync(data:SyncPayload, authorization:Optional[str]=Header(None)):
             if not exists:
                 row={'Farmer_ID':r.farmer_id,'Registration_Date':r.registration_date,'Agent_ID':agent,'Farmer_Full_Name':r.farmer_full_name,'Gender':r.gender,'Date_of_Birth':r.date_of_birth,'Phone_Number':r.phone_number,'Alternate_Phone':r.alternate_phone,'Email_Address':r.email_address,'NIN':r.nin,'State':r.state,'LGA':r.lga,'Ward':r.ward,'Community_Village':r.community_village,'Residential_Address':r.residential_address,'Primary_Crop':r.primary_crop,'Secondary_Crop':r.secondary_crop,'Farm_Size_Ha':r.farm_size_ha,'Input_Distributed':r.input_distributed,'Quantity_Units':r.quantity_units,'NIN_Status':r.nin_status,'ID_Type':r.id_type,'ID_Number':r.id_number,'Latitude':r.latitude,'Longitude':r.longitude,'Enumerator_Remarks':f'{r.enumerator_remarks} | GPS accuracy: {r.gps_accuracy or "-"}m | Territory: VALIDATED','Photo_Path':'','Photo_Status':'Captured' if r.photo_data else 'No Photo','Photo_Data':r.photo_data,'Photo_Mime':r.photo_mime}
                 insert_farmer(row)
-            record_sync_receipt(r.farmer_id, agent, 'SYNCED')
-            results.append({'farmer_id':r.farmer_id,'status':'SYNCED'})
+            new_receipt = record_sync_receipt(r.farmer_id, agent, 'SYNCED')
+            results.append({
+                'farmer_id': r.farmer_id,
+                'status': 'SYNCED',
+                'receipt_created': bool(new_receipt),
+                'message': 'Synced successfully' if new_receipt else 'Already synced; duplicate retry ignored',
+            })
         except Exception as e:
             err = str(e)[:300]
             record_sync_receipt(r.farmer_id, agent, 'FAILED', err)

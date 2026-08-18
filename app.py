@@ -817,6 +817,74 @@ st.markdown(
         }}
     }}
 
+
+    /* FINAL VISIBLE ACTION-BUTTON OVERRIDE
+       Explicit keyed containers make these selectors reliable across Streamlit builds. */
+    .st-key-refresh_sync_action button,
+    div[class*="st-key-refresh_sync_action"] button,
+    .st-key-workspace_logout_action button,
+    div[class*="st-key-workspace_logout_action"] button {{
+        background: linear-gradient(180deg, #2E8B57 0%, #1B5E20 100%) !important;
+        color: #FFFFFF !important;
+        -webkit-text-fill-color: #FFFFFF !important;
+        border: 1px solid #154B19 !important;
+        border-radius: 11px !important;
+        min-height: 48px !important;
+        font-weight: 850 !important;
+        box-shadow:
+            0 5px 10px rgba(27,94,32,0.28),
+            inset 0 1px 0 rgba(255,255,255,0.25),
+            inset 0 -2px 0 rgba(0,0,0,0.12) !important;
+    }}
+
+    .st-key-refresh_sync_action button p,
+    .st-key-refresh_sync_action button span,
+    div[class*="st-key-refresh_sync_action"] button p,
+    div[class*="st-key-refresh_sync_action"] button span,
+    .st-key-workspace_logout_action button p,
+    .st-key-workspace_logout_action button span,
+    div[class*="st-key-workspace_logout_action"] button p,
+    div[class*="st-key-workspace_logout_action"] button span {{
+        color: #FFFFFF !important;
+        -webkit-text-fill-color: #FFFFFF !important;
+        font-weight: 850 !important;
+    }}
+
+    .st-key-refresh_sync_action button:hover,
+    div[class*="st-key-refresh_sync_action"] button:hover,
+    .st-key-workspace_logout_action button:hover,
+    div[class*="st-key-workspace_logout_action"] button:hover {{
+        background: linear-gradient(180deg, #39A465 0%, #23752F 100%) !important;
+        color: #FFFFFF !important;
+        border-color: #103D16 !important;
+        transform: translateY(-1px) !important;
+        box-shadow:
+            0 7px 14px rgba(27,94,32,0.30),
+            inset 0 1px 0 rgba(255,255,255,0.28),
+            inset 0 -2px 0 rgba(0,0,0,0.10) !important;
+    }}
+
+    .st-key-refresh_sync_action button:active,
+    div[class*="st-key-refresh_sync_action"] button:active,
+    .st-key-workspace_logout_action button:active,
+    div[class*="st-key-workspace_logout_action"] button:active {{
+        background: #174F1B !important;
+        transform: translateY(1px) !important;
+        box-shadow:
+            0 2px 4px rgba(27,94,32,0.24),
+            inset 0 2px 4px rgba(0,0,0,0.16) !important;
+    }}
+
+    @media (max-width: 768px) {{
+        .st-key-refresh_sync_action button,
+        div[class*="st-key-refresh_sync_action"] button,
+        .st-key-workspace_logout_action button,
+        div[class*="st-key-workspace_logout_action"] button {{
+            min-height: 52px !important;
+            font-size: 14px !important;
+        }}
+    }}
+
     </style>
     """,
     unsafe_allow_html=True,
@@ -1508,8 +1576,9 @@ def render_live_sync_monitor(selected_state, role, user_id):
     st.markdown("### Central Sync Monitor")
     action_col, note_col = st.columns([1, 3])
     with action_col:
-        if st.button("↻ Refresh Sync Monitor", key="refresh_central_sync_monitor", width="stretch"):
-            st.rerun()
+        with st.container(key="refresh_sync_action"):
+            if st.button("↻ Refresh Sync Monitor", key="refresh_central_sync_monitor", width="stretch"):
+                st.rerun()
     with note_col:
         st.caption("Live field activity refreshes automatically every 10 seconds while this dashboard is open.")
 
@@ -3323,12 +3392,13 @@ else:
         st.sidebar.write(f"**Coverage State:** {normalize_state_name(user_meta.get('state', '-'))}")
         st.sidebar.write(f"**Coverage LGA:** {user_meta.get('lga_coverage', '-')}")
 
-    if st.sidebar.button("Logout", width="stretch", key="workspace_logout"):
-        log_action(user_id, "LOGOUT", "User logged out")
-        st.session_state.logged_in = False
-        st.session_state.user_id = None
-        st.session_state.role = None
-        st.rerun()
+    with st.sidebar.container(key="workspace_logout_action"):
+        if st.button("Logout", width="stretch", key="workspace_logout"):
+            log_action(user_id, "LOGOUT", "User logged out")
+            st.session_state.logged_in = False
+            st.session_state.user_id = None
+            st.session_state.role = None
+            st.rerun()
 
     with st.sidebar.expander("🔑 Change Password"):
         old_pw = st.text_input("Current Password", type="password", key="side_old_pw")

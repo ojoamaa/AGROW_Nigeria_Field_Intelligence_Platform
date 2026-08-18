@@ -720,6 +720,103 @@ st.markdown(
         color: #145A32 !important;
         border-bottom: 3px solid #1B5E20 !important;
     }}
+
+    /* AGROW PITCH UI REFINEMENT — PRESENTATION ONLY
+       Resilient selectors keep the refresh/logout styling visible across
+       Streamlit wrapper changes without touching application behaviour. */
+    .st-key-refresh_central_sync_monitor button,
+    div[class*="st-key-refresh_central_sync_monitor"] button,
+    .st-key-workspace_logout button,
+    div[class*="st-key-workspace_logout"] button {{
+        background: linear-gradient(180deg, #2A7C45 0%, #1B5E20 100%) !important;
+        color: #FFFFFF !important;
+        -webkit-text-fill-color: #FFFFFF !important;
+        border: 1.5px solid #154B19 !important;
+        border-radius: 11px !important;
+        min-height: 48px !important;
+        font-weight: 850 !important;
+        letter-spacing: 0.1px !important;
+        box-shadow:
+            0 5px 10px rgba(27,94,32,0.24),
+            inset 0 1px 0 rgba(255,255,255,0.22),
+            inset 0 -2px 0 rgba(0,0,0,0.10) !important;
+        transition:
+            transform 120ms ease,
+            box-shadow 120ms ease,
+            background 120ms ease,
+            border-color 120ms ease !important;
+    }}
+
+    .st-key-refresh_central_sync_monitor button p,
+    .st-key-refresh_central_sync_monitor button span,
+    div[class*="st-key-refresh_central_sync_monitor"] button p,
+    div[class*="st-key-refresh_central_sync_monitor"] button span,
+    .st-key-workspace_logout button p,
+    .st-key-workspace_logout button span,
+    div[class*="st-key-workspace_logout"] button p,
+    div[class*="st-key-workspace_logout"] button span {{
+        color: #FFFFFF !important;
+        -webkit-text-fill-color: #FFFFFF !important;
+        font-weight: 850 !important;
+    }}
+
+    .st-key-refresh_central_sync_monitor button:hover,
+    div[class*="st-key-refresh_central_sync_monitor"] button:hover,
+    .st-key-workspace_logout button:hover,
+    div[class*="st-key-workspace_logout"] button:hover {{
+        background: linear-gradient(180deg, #318C4D 0%, #216E2D 100%) !important;
+        color: #FFFFFF !important;
+        border-color: #103D16 !important;
+        transform: translateY(-1px) !important;
+        box-shadow:
+            0 7px 14px rgba(27,94,32,0.28),
+            inset 0 1px 0 rgba(255,255,255,0.25),
+            inset 0 -2px 0 rgba(0,0,0,0.08) !important;
+    }}
+
+    .st-key-refresh_central_sync_monitor button:active,
+    div[class*="st-key-refresh_central_sync_monitor"] button:active,
+    .st-key-workspace_logout button:active,
+    div[class*="st-key-workspace_logout"] button:active {{
+        transform: translateY(1px) !important;
+        background: #174F1B !important;
+        box-shadow:
+            0 2px 5px rgba(27,94,32,0.22),
+            inset 0 2px 4px rgba(0,0,0,0.16) !important;
+    }}
+
+    .st-key-refresh_central_sync_monitor button:focus-visible,
+    div[class*="st-key-refresh_central_sync_monitor"] button:focus-visible,
+    .st-key-workspace_logout button:focus-visible,
+    div[class*="st-key-workspace_logout"] button:focus-visible {{
+        outline: 3px solid rgba(27,94,32,0.22) !important;
+        outline-offset: 2px !important;
+    }}
+
+    [data-testid="stMetric"] {{
+        transition: transform 120ms ease, box-shadow 120ms ease !important;
+    }}
+    [data-testid="stMetric"]:hover {{
+        transform: translateY(-1px);
+        box-shadow: 0 6px 16px rgba(0,0,0,0.08) !important;
+    }}
+    [data-testid="stDataFrame"] {{
+        border: 1px solid #E0E6E2 !important;
+        border-radius: 12px !important;
+        overflow: hidden !important;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.04) !important;
+    }}
+
+    @media (max-width: 768px) {{
+        .st-key-refresh_central_sync_monitor button,
+        div[class*="st-key-refresh_central_sync_monitor"] button,
+        .st-key-workspace_logout button,
+        div[class*="st-key-workspace_logout"] button {{
+            min-height: 52px !important;
+            font-size: 14px !important;
+        }}
+    }}
+
     </style>
     """,
     unsafe_allow_html=True,
@@ -3226,7 +3323,7 @@ else:
         st.sidebar.write(f"**Coverage State:** {normalize_state_name(user_meta.get('state', '-'))}")
         st.sidebar.write(f"**Coverage LGA:** {user_meta.get('lga_coverage', '-')}")
 
-    if st.sidebar.button("Logout", width="stretch"):
+    if st.sidebar.button("Logout", width="stretch", key="workspace_logout"):
         log_action(user_id, "LOGOUT", "User logged out")
         st.session_state.logged_in = False
         st.session_state.user_id = None

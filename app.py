@@ -69,6 +69,23 @@ def ensure_field_sync_receipts_table():
         """
         with engine.begin() as conn:
             conn.execute(text(ddl))
+            # Collapse historical duplicate successful receipts and enforce
+            # one accepted successful receipt per farmer + agent.
+            conn.execute(text("""
+                DELETE FROM field_sync_receipts
+                WHERE UPPER(sync_status) = 'SYNCED'
+                  AND id NOT IN (
+                        SELECT MIN(id)
+                        FROM field_sync_receipts
+                        WHERE UPPER(sync_status) = 'SYNCED'
+                        GROUP BY farmer_id, agent_id
+                  )
+            """))
+            conn.execute(text("""
+                CREATE UNIQUE INDEX IF NOT EXISTS ux_field_sync_success
+                ON field_sync_receipts (farmer_id, agent_id)
+                WHERE UPPER(sync_status) = 'SYNCED'
+            """))
     except Exception:
         pass
 
@@ -901,32 +918,325 @@ def valid_email(email: str) -> bool:
     return "@" in email and "." in email
 
 
-def table_to_csv_download(df: pd.DataFrame, filename: str):
-    csv_data = df.to_csv(index=False).encode("utf-8")
+
+def fetch_complete_farmer_registry() -> pd.DataFrame:
+    """Read the authoritative farmers table directly for complete analysis export.
+
+    This deliberately does not depend on the compact fetch_farmers() projection,
+    because the export must contain every non-image registration field stored in
+    the farmers table.
+    """
+    try:
+        with get_engine().connect() as conn:
+            result = conn.execute(text("SELECT * FROM farmers"))
+            rows = result.mappings().all()
+        return pd.DataFrame([dict(r) for r in rows])
+    except Exception:
+        # Safe fallback for environments where the full table cannot be queried.
+        try:
+            return fetch_farmers().copy()
+        except Exception:
+            return pd.DataFrame()
+
+
+def _canonical_farmer_column_name(column_name: str) -> str:
+    """Map database naming variants to the AGROW export schema."""
+    raw = str(column_name or "").strip()
+    key = re.sub(r"[^a-z0-9]+", "_", raw.lower()).strip("_")
+    aliases = {
+        "id": "Database_ID",
+        "farmer_id": "Farmer_ID",
+        "registration_date": "Registration_Date",
+        "agent_id": "Agent_ID",
+        "farmer_full_name": "Farmer_Full_Name",
+        "gender": "Gender",
+        "date_of_birth": "Date_of_Birth",
+        "phone_number": "Phone_Number",
+        "alternate_phone": "Alternate_Phone",
+        "email_address": "Email_Address",
+        "nin": "NIN",
+        "state": "State",
+        "lga": "LGA",
+        "ward": "Ward",
+        "community_village": "Community_Village",
+        "community": "Community_Village",
+        "village": "Community_Village",
+        "residential_address": "Residential_Address",
+        "address": "Residential_Address",
+        "primary_crop": "Primary_Crop",
+        "secondary_crop": "Secondary_Crop",
+        "farm_size_ha": "Farm_Size_Ha",
+        "farm_size": "Farm_Size_Ha",
+        "input_distributed": "Input_Distributed",
+        "inputs_distributed": "Input_Distributed",
+        "support_delivered": "Input_Distributed",
+        "input_support_delivered": "Input_Distributed",
+        "quantity_units": "Quantity_Units",
+        "input_quantity": "Quantity_Units",
+        "quantity": "Quantity_Units",
+        "nin_status": "NIN_Status",
+        "id_type": "ID_Type",
+        "id_number": "ID_Number",
+        "latitude": "Latitude",
+        "longitude": "Longitude",
+        "gps_accuracy": "GPS_Accuracy_M",
+        "enumerator_remarks": "Enumerator_Remarks",
+        "remarks": "Enumerator_Remarks",
+        "photo_status": "Photo_Status",
+        "photo_path": "Photo_Path",
+        "photo_data": "Photo_Data",
+        "photo_mime": "Photo_Mime",
+    }
+    return aliases.get(key, raw)
+
+
+def _normalise_nigerian_phone(value) -> str:
+    """Return a phone identifier as text and restore common Nigerian leading zeroes."""
+    if value is None:
+        return ""
+    try:
+        if pd.isna(value):
+            return ""
+    except Exception:
+        pass
+    text_value = str(value).strip()
+    if not text_value or text_value.lower() in {"nan", "none"}:
+        return ""
+
+    # Undo Excel/database numeric formatting where possible (e.g. 8.123E+09).
+    if re.fullmatch(r"\d+(?:\.0+)?", text_value):
+        text_value = text_value.split(".", 1)[0]
+    elif re.fullmatch(r"\d+(?:\.\d+)?[eE][+-]?\d+", text_value):
+        try:
+            text_value = format(float(text_value), ".0f")
+        except Exception:
+            pass
+
+    digits = re.sub(r"\D", "", text_value)
+    if digits.startswith("234") and len(digits) == 13:
+        digits = "0" + digits[3:]
+    elif len(digits) == 10 and digits[0] in "789":
+        digits = "0" + digits
+
+    # Keep standard Nigerian mobile length, otherwise preserve cleaned content.
+    if len(digits) in {10, 11, 13}:
+        return digits
+    return text_value
+
+def clean_registry_export(df: pd.DataFrame) -> pd.DataFrame:
+    """Export every farmer detail except raw/technical image content.
+
+    Keeps all operational registration fields (including inputs distributed,
+    quantities, location, identity, remarks and any future non-image fields),
+    while excluding photo paths, MIME/base64/binary payloads and payload-only rows.
+    """
+    if df is None or df.empty:
+        return pd.DataFrame()
+
+    out = df.copy()
+
+    # Canonicalise all naming variants first so complete database fields are retained.
+    rename_all = {c: _canonical_farmer_column_name(c) for c in out.columns}
+    out = out.rename(columns=rename_all)
+
+    farmer_aliases = {
+        "farmer_id": "Farmer_ID", "registration_date": "Registration_Date",
+        "agent_id": "Agent_ID", "farmer_full_name": "Farmer_Full_Name",
+        "gender": "Gender", "date_of_birth": "Date_of_Birth",
+        "phone_number": "Phone_Number", "alternate_phone": "Alternate_Phone",
+        "email_address": "Email_Address", "nin": "NIN", "state": "State",
+        "lga": "LGA", "ward": "Ward", "community_village": "Community_Village",
+        "residential_address": "Residential_Address", "primary_crop": "Primary_Crop",
+        "secondary_crop": "Secondary_Crop", "farm_size_ha": "Farm_Size_Ha",
+        "input_distributed": "Input_Distributed", "quantity_units": "Quantity_Units",
+        "nin_status": "NIN_Status", "id_type": "ID_Type", "id_number": "ID_Number",
+        "latitude": "Latitude", "longitude": "Longitude",
+        "enumerator_remarks": "Enumerator_Remarks", "photo_status": "Photo_Status",
+        "photo_path": "Photo_Path",
+    }
+    rename_map = {k: v for k, v in farmer_aliases.items() if k in out.columns and v not in out.columns}
+    if rename_map:
+        out = out.rename(columns=rename_map)
+
+    # If legacy/new schema variants collapse to the same canonical name, coalesce them.
+    if out.columns.duplicated().any():
+        rebuilt = pd.DataFrame(index=out.index)
+        for name in dict.fromkeys(out.columns):
+            same = out.loc[:, out.columns == name]
+            if same.shape[1] == 1:
+                rebuilt[name] = same.iloc[:, 0]
+            else:
+                merged = same.iloc[:, 0]
+                for i in range(1, same.shape[1]):
+                    candidate = same.iloc[:, i]
+                    empty = merged.isna() | merged.astype(str).str.strip().isin({"", "nan", "None"})
+                    merged = merged.where(~empty, candidate)
+                rebuilt[name] = merged
+        out = rebuilt
+
+    is_farmer_register = "Farmer_ID" in out.columns
+
+    # Retain a harmless Yes/No photo indicator, but never export the image/path/payload.
+    if is_farmer_register:
+        status = out["Photo_Status"].fillna("").astype(str) if "Photo_Status" in out.columns else pd.Series("", index=out.index)
+        path = out["Photo_Path"].fillna("").astype(str) if "Photo_Path" in out.columns else pd.Series("", index=out.index)
+        captured = status.str.strip().str.lower().isin({"captured", "yes", "true", "1", "photo captured"}) | path.str.strip().replace({"nan": "", "None": ""}).ne("")
+        out["Photo_Captured"] = captured.map({True: "Yes", False: "No"})
+
+    # Drop ONLY image/binary technical columns. All other registration details remain.
+    blocked_tokens = (
+        "photo_path", "photo_data", "image_data", "photo_mime", "image_mime",
+        "base64", "binary_data", "blob", "raw_image", "image_bytes", "photo_bytes"
+    )
+    drop_cols = [c for c in out.columns if any(token in str(c).lower() for token in blocked_tokens)]
+    out = out.drop(columns=drop_cols, errors="ignore")
+
+    if is_farmer_register:
+        farmer_ids = out["Farmer_ID"].fillna("").astype(str).str.strip()
+        out = out.loc[farmer_ids.ne("") & ~farmer_ids.str.lower().isin({"nan", "none"})].copy()
+        if "Registration_Date" in out.columns:
+            out = out.assign(_sort_dt=pd.to_datetime(out["Registration_Date"], errors="coerce")).sort_values("_sort_dt", ascending=False, na_position="last")
+        out = out.drop_duplicates(subset=["Farmer_ID"], keep="first").drop(columns=["_sort_dt"], errors="ignore")
+
+    def safe_text(value):
+        if value is None:
+            return ""
+        try:
+            if pd.isna(value): return ""
+        except Exception:
+            pass
+        if isinstance(value, (bytes, bytearray, memoryview)): return ""
+        value = str(value)
+        low = value.lower().strip()
+        if any(m in low for m in ("data:image/", ";base64,", "image/jpeg", "image/png", "image/webp", "application/octet-stream")):
+            return ""
+        value = value.replace("\r", " " ).replace("\n", " " ).replace("\t", " " )
+        value = re.sub(r"[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]", "", value)
+        return re.sub(r"\s{2,}", " ", value).strip()
+
+    for col in out.columns:
+        if out[col].dtype == "object":
+            out[col] = out[col].map(safe_text)
+
+    text_columns = {"Farmer_ID", "Agent_ID", "Phone_Number", "Alternate_Phone", "NIN", "ID_Number", "Ward"}
+    for col in text_columns.intersection(out.columns):
+        out[col] = out[col].fillna("").astype(str).map(safe_text)
+
+    for col in {"Phone_Number", "Alternate_Phone"}.intersection(out.columns):
+        out[col] = out[col].map(_normalise_nigerian_phone)
+
+    if "Registration_Date" in out.columns:
+        parsed = pd.to_datetime(out["Registration_Date"], errors="coerce")
+        out["Registration_Date"] = [dt.strftime("%Y-%m-%d %H:%M:%S") if pd.notna(dt) else safe_text(raw) for dt, raw in zip(parsed, out["Registration_Date"])]
+    if "Date_of_Birth" in out.columns:
+        parsed = pd.to_datetime(out["Date_of_Birth"], errors="coerce")
+        out["Date_of_Birth"] = [dt.strftime("%Y-%m-%d") if pd.notna(dt) else safe_text(raw) for dt, raw in zip(parsed, out["Date_of_Birth"])]
+
+    return out.reset_index(drop=True)
+
+
+def _excel_safe_csv_text(value):
+    """Make numeric identifiers display as text when CSV is opened in Excel."""
+    text_value = str(value or "").strip()
+    if not text_value:
+        return ""
+    # Only wrap digit-only values. This avoids formula injection from arbitrary text.
+    if text_value.isdigit():
+        return f'="{text_value}"'
+    return text_value
+
+
+def table_to_csv_download(df: pd.DataFrame, filename: str, key: str | None = None):
+    export_df = clean_registry_export(df)
+
+    # CSV is a data-interchange format and Excel otherwise turns phone/NIN values
+    # into numbers/scientific notation.  Wrap digit-only identity fields in a
+    # safe Excel text formula so leading zeroes remain visible when double-clicked.
+    csv_df = export_df.copy()
+    excel_text_columns = {
+        "Phone_Number", "Alternate_Phone", "NIN", "ID_Number"
+    }
+    for col in excel_text_columns.intersection(csv_df.columns):
+        csv_df[col] = csv_df[col].map(_excel_safe_csv_text)
+
+    csv_data = csv_df.to_csv(index=False, lineterminator="\r\n").encode("utf-8-sig")
     st.download_button(
-        label=f"⬇️ Download {filename}",
+        label=f"⬇️ Download CSV — {filename}",
         data=csv_data,
         file_name=filename,
         mime="text/csv",
         width="stretch",
+        key=key or f"csv_download_{safe_filename(filename)}",
     )
 
 
-def table_to_excel_download(df: pd.DataFrame, filename: str):
+def table_to_excel_download(df: pd.DataFrame, filename: str, key: str | None = None):
+    from openpyxl.styles import Font, PatternFill, Alignment
+    from openpyxl.utils import get_column_letter
+
+    export_df = clean_registry_export(df)
     output = BytesIO()
 
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        df.to_excel(writer, index=False, sheet_name="Report")
+        export_df.to_excel(writer, index=False, sheet_name="Farmer Register")
+        ws = writer.book["Farmer Register"]
+        ws.freeze_panes = "A2"
+        ws.auto_filter.ref = ws.dimensions
+
+        header_fill = PatternFill("solid", fgColor="1F6B45")
+        header_font = Font(color="FFFFFF", bold=True)
+        for cell in ws[1]:
+            cell.fill = header_fill
+            cell.font = header_font
+            cell.alignment = Alignment(
+                horizontal="center", vertical="center", wrap_text=True
+            )
+
+        text_columns = {
+            "Farmer_ID", "Agent_ID", "Phone_Number", "Alternate_Phone",
+            "NIN", "ID_Number", "Ward",
+        }
+
+        for idx, col_name in enumerate(export_df.columns, start=1):
+            letter = get_column_letter(idx)
+            values = [str(col_name)] + [
+                str(v) if v is not None else ""
+                for v in export_df[col_name].head(200)
+            ]
+            max_len = min(max((len(v) for v in values), default=10) + 2, 42)
+            ws.column_dimensions[letter].width = max(12, max_len)
+
+            if col_name in text_columns:
+                for cell in ws[letter][1:]:
+                    # Force the actual stored value to a string, not merely the
+                    # display format. This prevents 081... -> 8.1E+09.
+                    cell.value = "" if cell.value is None else str(cell.value)
+                    cell.number_format = "@"
+
+            if col_name in {"Registration_Date", "Date_of_Birth"}:
+                ws.column_dimensions[letter].width = max(
+                    ws.column_dimensions[letter].width, 20
+                )
+
+        for row in ws.iter_rows(min_row=2):
+            for cell in row:
+                cell.alignment = Alignment(vertical="top", wrap_text=False)
+
+        # Friendly worksheet settings.
+        ws.sheet_view.showGridLines = False
+        ws.row_dimensions[1].height = 28
 
     output.seek(0)
 
     st.download_button(
-        label=f"⬇️ Download {filename}",
+        label=f"⬇️ Download Excel — {filename}",
         data=output.getvalue(),
         file_name=filename,
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         width="stretch",
+        key=key or f"excel_download_{safe_filename(filename)}",
     )
+
 
 def is_db_available() -> bool:
     try:
@@ -2687,6 +2997,9 @@ else:
             <div style="font-size:clamp(11px, 1.8vw, 14px); color:#555; margin-top:6px; line-height:1.5;">
                 Connecting verified farmer records, geographic field intelligence, input distribution and accountable agricultural operations
             </div>
+            <div style="font-size:clamp(10px, 1.6vw, 13px); color:#6A6A6A; margin-top:5px; line-height:1.45;">
+                Built for governments, NGOs, development programmes, cooperatives, agribusinesses, research organisations and other agricultural institutions
+            </div>
         </div>
         """,
         unsafe_allow_html=True,
@@ -2767,7 +3080,7 @@ else:
             rejected_nin = len(df[df["nin_status"] == "Rejected"])
             captured_photos = len(df[df["photo_status"] == "Captured"])
 
-        st.markdown("### National Performance Overview")
+        st.markdown("### Agricultural Operations Overview")
 
         row1 = st.columns(4)
         row1[0].metric("Registered Farmers", total_beneficiaries)
@@ -2795,6 +3108,41 @@ else:
             st.info(f"Coverage State: {normalize_state_name(user_meta.get('state', '-'))}")
             st.info(f"Coverage LGA: {user_meta.get('lga_coverage', '-')}")
             st.info("Target Agent Uptime: 99%")
+
+        # ---------------------------------------------------------
+        # Dashboard reporting access
+        # ---------------------------------------------------------
+        st.markdown("### Data & Reporting")
+        st.caption(
+            "Download the complete non-image farmer register available within your current access scope. "
+            "The export retains identity, contact, location, crop, farm-size, input-distribution, verification, "
+            "GPS and enumerator fields for programme monitoring and further analysis."
+        )
+
+        dashboard_export_df = fetch_complete_farmer_registry()
+        if not dashboard_export_df.empty:
+            # Respect the same state/agent scope already applied to the signed-in dashboard.
+            dashboard_fid_col = next(
+                (c for c in dashboard_export_df.columns if _canonical_farmer_column_name(c) == "Farmer_ID"),
+                None,
+            )
+            if dashboard_fid_col and not df.empty and "farmer_id" in df.columns:
+                dashboard_wanted_ids = set(df["farmer_id"].fillna("").astype(str))
+                dashboard_export_df = dashboard_export_df[
+                    dashboard_export_df[dashboard_fid_col].fillna("").astype(str).isin(dashboard_wanted_ids)
+                ].copy()
+            elif df.empty:
+                dashboard_export_df = dashboard_export_df.iloc[0:0].copy()
+
+        if dashboard_export_df.empty:
+            st.info("No farmer records are currently available within this access scope for export.")
+        else:
+            report_col1, report_col2 = st.columns(2)
+            with report_col1:
+                table_to_excel_download(dashboard_export_df, "agrow_master_registry.xlsx", key="dashboard_master_excel")
+            with report_col2:
+                table_to_csv_download(dashboard_export_df, "agrow_master_registry.csv", key="dashboard_master_csv")
+            st.caption(f"Records available in this export: {len(clean_registry_export(dashboard_export_df)):,}")
 
         st.divider()
 
@@ -2871,8 +3219,20 @@ else:
 
         st.subheader("Recent Farmer Registrations")
         if not df.empty:
-            recent_df = df.sort_values(by="registration_date", ascending=False).head(10)
-            st.dataframe(recent_df, width="stretch")
+            recent_df = clean_registry_export(df)
+            recent_screen_columns = [
+                "Farmer_ID", "Registration_Date", "Agent_ID", "Farmer_Full_Name",
+                "Gender", "Date_of_Birth", "Phone_Number", "State", "LGA",
+                "Primary_Crop", "NIN_Status", "Photo_Captured",
+            ]
+            recent_screen_columns = [
+                c for c in recent_screen_columns if c in recent_df.columns
+            ]
+            st.dataframe(
+                recent_df.head(10)[recent_screen_columns],
+                width="stretch",
+                hide_index=True,
+            )
         else:
             st.info("No farmer records yet")
 
@@ -2881,7 +3241,7 @@ else:
         st.markdown("### Central Sync Monitor")
         st.caption(
             "This monitor is an operational audit trail of AGROW Field device transmissions. "
-            "Sync receipts are cumulative and may include more than one receipt for the same farmer. "
+            "Successful sync receipts are idempotent: one accepted receipt per farmer and agent. "
             "The Farmer Register remains the authoritative source for unique farmer registrations and registration dates."
         )
 
@@ -2917,11 +3277,12 @@ else:
                 )
 
             today_date = pd.Timestamp.now().date()
+            today_success = receipts_work.loc[
+                synced_mask & receipts_work["received_at_dt"].dt.date.eq(today_date)
+            ]
             synced_today = int(
-                (
-                    synced_mask
-                    & receipts_work["received_at_dt"].dt.date.eq(today_date)
-                ).sum()
+                today_success["farmer_id"].dropna().astype(str).nunique()
+                if "farmer_id" in today_success.columns else len(today_success)
             )
 
             if "received_at" in receipts_work.columns:
@@ -2979,8 +3340,8 @@ else:
                     rp["sync_status_norm"].eq("SYNCED")
                     & rp["received_at_dt"].dt.date.eq(today_date)
                 ]
-                .groupby("agent_id", dropna=False)
-                .size()
+                .groupby("agent_id", dropna=False)["farmer_id"]
+                .nunique()
                 .rename("synced_today")
                 .reset_index()
             )
@@ -3568,8 +3929,8 @@ else:
             "Longitude", "Enumerator_Remarks", "Photo_Status", "Photo_Path",
         ]
 
-        available_columns = [col for col in preferred_columns if col in display_df.columns]
-        display_df = display_df[available_columns]
+        # Keep every database registration field for CSV/XLSX export.
+        # The screen remains compact below; clean_registry_export removes only image/binary fields.
 
         screen_columns = [
             "Farmer_ID", "Registration_Date", "Agent_ID", "Farmer_Full_Name", "Gender",
@@ -3654,13 +4015,24 @@ else:
         else:
             st.info("No captured farmer photos available for preview yet.")
 
+        # Full analytical export comes directly from the authoritative farmers table,
+        # not from the compact screen projection.  Preserve the current filter by Farmer_ID.
+        full_export_df = fetch_complete_farmer_registry()
+        if not full_export_df.empty and not filtered_df.empty:
+            fid_col = next((c for c in full_export_df.columns if _canonical_farmer_column_name(c) == "Farmer_ID"), None)
+            if fid_col and "farmer_id" in filtered_df.columns:
+                wanted_ids = set(filtered_df["farmer_id"].fillna("").astype(str))
+                full_export_df = full_export_df[full_export_df[fid_col].fillna("").astype(str).isin(wanted_ids)].copy()
+        elif full_export_df.empty:
+            full_export_df = display_df
+
         download_col1, download_col2 = st.columns(2)
 
         with download_col1:
-            table_to_csv_download(display_df, "agrow_master_registry.csv")
+            table_to_csv_download(full_export_df, "agrow_master_registry.csv", key="farmer_tab_master_csv")
 
         with download_col2:
-            table_to_excel_download(display_df, "agrow_master_registry.xlsx")       
+            table_to_excel_download(full_export_df, "agrow_master_registry.xlsx", key="farmer_tab_master_excel")       
 
     # =========================================================
     # TAB 4: FARMER VERIFICATION
@@ -3736,9 +4108,9 @@ else:
 
                 a1, a2 = st.columns(2)
                 with a1:
-                    table_to_csv_download(agent_df, "agrow_registered_agents.csv")
+                    table_to_csv_download(agent_df, "agrow_registered_agents.csv", key="admin_agents_csv")
                 with a2:
-                    table_to_excel_download(agent_df, "agrow_registered_agents.xlsx")
+                    table_to_excel_download(agent_df, "agrow_registered_agents.xlsx", key="admin_agents_excel")
             else:
                 st.info("No registered agents yet.")
 

@@ -15,7 +15,7 @@ FARMER_PHOTO_DIR = Path("uploads") / "farmers"
 
 
 def _ensure_photo_columns():
-    """Add persistent photo columns to an existing farmers table when needed.
+    """Add persistent photo and reusable programme-context columns to an existing farmers table when needed.
 
     photo_data stores the image as base64 text so the same farmer photograph is
     available from PostgreSQL on every device/Render instance. Existing
@@ -41,6 +41,12 @@ def _ensure_photo_columns():
                 conn.execute(text("ALTER TABLE farmers ADD COLUMN photo_data TEXT"))
             if "photo_mime" not in columns:
                 conn.execute(text("ALTER TABLE farmers ADD COLUMN photo_mime TEXT"))
+            if "support_needs" not in columns:
+                conn.execute(text("ALTER TABLE farmers ADD COLUMN support_needs TEXT"))
+            if "support_priority" not in columns:
+                conn.execute(text("ALTER TABLE farmers ADD COLUMN support_priority TEXT"))
+            if "programme_name" not in columns:
+                conn.execute(text("ALTER TABLE farmers ADD COLUMN programme_name TEXT"))
     except Exception:
         # init_db() may not have created the table yet during first import.
         # fetch_farmers()/insert_farmer() call this again after table creation.
@@ -163,7 +169,8 @@ def insert_farmer(row: dict):
       "phone_number":"Phone_Number","alternate_phone":"Alternate_Phone","email_address":"Email_Address",
       "nin":"NIN","state":"State","lga":"LGA","ward":"Ward","community_village":"Community_Village",
       "residential_address":"Residential_Address","primary_crop":"Primary_Crop","secondary_crop":"Secondary_Crop",
-      "farm_size_ha":"Farm_Size_Ha","input_distributed":"Input_Distributed","quantity_units":"Quantity_Units",
+      "farm_size_ha":"Farm_Size_Ha","support_needs":"Support_Needs","support_priority":"Support_Priority",
+      "programme_name":"Programme_Name","input_distributed":"Input_Distributed","quantity_units":"Quantity_Units",
       "nin_status":"NIN_Status","id_type":"ID_Type","id_number":"ID_Number","latitude":"Latitude",
       "longitude":"Longitude","enumerator_remarks":"Enumerator_Remarks","photo_path":"Photo_Path",
       "photo_status":"Photo_Status","photo_data":"Photo_Data","photo_mime":"Photo_Mime"}

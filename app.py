@@ -38,6 +38,7 @@ from services.user_service import (
     fetch_all_agents,
     generate_agent_id_db,
 )
+from services.intervention_service import create_intervention, fetch_interventions
 from services.market_service import (
     create_market_listing,
     fetch_market_listings,
@@ -311,6 +312,25 @@ PRIMARY_GREEN = "#1B5E20"
 OFFICIAL_BLUE = "#004B87"
 LIGHT_BG = "#F8F9FA"
 TEXT_GREY = "#5F6368"
+
+# Reusable catalogue for programme delivery/intervention records.
+# This is intentionally separate from the farmer-registration form so that
+# AGROW can be reused across different projects and intervention packages.
+PROGRAMME_SUPPORT_OPTIONS = [
+    "Improved Seeds / Planting Materials",
+    "Fertilizer / Soil Amendments",
+    "Crop Protection Inputs",
+    "Irrigation / Water Support",
+    "Mechanization Services",
+    "Extension / Advisory Support",
+    "Training / Capacity Building",
+    "Finance / Credit Support",
+    "Post-Harvest / Storage Support",
+    "Processing Support",
+    "Market Linkage / Market Access",
+    "Livestock / Poultry Support",
+    "Other",
+]
 
 LOGO_CANDIDATES = [
     "proposal_logo.png",
@@ -885,6 +905,25 @@ st.markdown(
         }}
     }}
 
+
+    /* Administrator live-refresh action: AGROW green, visible and touch-friendly. */
+    .st-key-dashboard_refresh_action button,
+    div[class*="st-key-dashboard_refresh_action"] button {{
+        background: linear-gradient(180deg, #2E8B57 0%, #1B5E20 100%) !important;
+        color: #FFFFFF !important;
+        -webkit-text-fill-color: #FFFFFF !important;
+        border: 1px solid #154B19 !important;
+        border-radius: 11px !important;
+        min-height: 48px !important;
+        font-weight: 850 !important;
+        box-shadow: 0 5px 10px rgba(27,94,32,0.25), inset 0 1px 0 rgba(255,255,255,0.24), inset 0 -2px 0 rgba(0,0,0,0.10) !important;
+    }}
+    .st-key-dashboard_refresh_action button p,
+    div[class*="st-key-dashboard_refresh_action"] button p {{
+        color: #FFFFFF !important;
+        -webkit-text-fill-color: #FFFFFF !important;
+    }}
+
     </style>
     """,
     unsafe_allow_html=True,
@@ -1132,6 +1171,9 @@ def _canonical_farmer_column_name(column_name: str) -> str:
         "secondary_crop": "Secondary_Crop",
         "farm_size_ha": "Farm_Size_Ha",
         "farm_size": "Farm_Size_Ha",
+        "support_needs": "Support_Needs",
+        "support_priority": "Support_Priority",
+        "programme_name": "Programme_Name",
         "input_distributed": "Input_Distributed",
         "inputs_distributed": "Input_Distributed",
         "support_delivered": "Input_Distributed",
@@ -1213,7 +1255,8 @@ def clean_registry_export(df: pd.DataFrame) -> pd.DataFrame:
         "lga": "LGA", "ward": "Ward", "community_village": "Community_Village",
         "residential_address": "Residential_Address", "primary_crop": "Primary_Crop",
         "secondary_crop": "Secondary_Crop", "farm_size_ha": "Farm_Size_Ha",
-        "input_distributed": "Input_Distributed", "quantity_units": "Quantity_Units",
+        "support_needs": "Support_Needs", "support_priority": "Support_Priority",
+        "programme_name": "Programme_Name", "input_distributed": "Input_Distributed", "quantity_units": "Quantity_Units",
         "nin_status": "NIN_Status", "id_type": "ID_Type", "id_number": "ID_Number",
         "latitude": "Latitude", "longitude": "Longitude",
         "enumerator_remarks": "Enumerator_Remarks", "photo_status": "Photo_Status",
@@ -1591,6 +1634,17 @@ def render_live_sync_monitor(selected_state, role, user_id):
     receipts_df = fetch_field_sync_receipts()
     fresh_df = _fetch_scoped_dashboard_farmers(selected_state, role, user_id)
 
+    # Apply the administrator's geographic view to device receipts as well.
+    if role == "admin" and selected_state != "All Nigeria" and not receipts_df.empty:
+        agents_df = fetch_all_agents()
+        scoped_agents = set(
+            agents_df.loc[agents_df["State"].astype(str) == str(selected_state), "Agent_ID"]
+            .fillna("").astype(str).str.upper()
+        ) if not agents_df.empty else set()
+        receipts_df = receipts_df[
+            receipts_df["agent_id"].fillna("").astype(str).str.upper().isin(scoped_agents)
+        ].copy()
+
     total_sync_receipts = 0
     unique_farmers_synced = 0
     synced_today = 0
@@ -1646,47 +1700,78 @@ def render_live_sync_monitor(selected_state, role, user_id):
         st.info("No agent performance data is available yet.")
 
     st.markdown("#### Field Operations Summary")
-    st.caption(
-        "Pitch view for the signed-in field user. Registration figures come from the Farmer Register; "
-        "mobile synchronization figures come from the AGROW Field device receipt trail. "
-        "The Streamlit fallback queue remains a backend diagnostic and is intentionally hidden here."
-    )
-
-    current_agent_registered = 0
-    current_agent_registered_today = 0
-    current_agent_unique_synced = 0
-    current_agent_synced_today = 0
-    current_agent_failed = 0
-    current_agent_last_activity = "—"
-
-    if not agent_perf.empty and "agent_id" in agent_perf.columns:
-        current_agent_row = agent_perf[
-            agent_perf["agent_id"].astype(str).str.upper() == str(user_id).upper()
-        ]
-        if not current_agent_row.empty:
-            row = current_agent_row.iloc[0]
-            current_agent_registered = int(row.get("registered_farmers", 0) or 0)
-            current_agent_registered_today = int(row.get("registered_today", 0) or 0)
-            current_agent_unique_synced = int(row.get("unique_farmers_synced", 0) or 0)
-            current_agent_synced_today = int(row.get("synced_today", 0) or 0)
-            current_agent_failed = int(row.get("failed_syncs", 0) or 0)
-            last_activity_value = row.get("last_activity", pd.NaT)
-            if pd.notna(last_activity_value):
-                current_agent_last_activity = str(last_activity_value)
-
-    f1, f2, f3 = st.columns(3)
-    f1.metric("My Registered Farmers", current_agent_registered)
-    f2.metric("My Registered Today", current_agent_registered_today)
-    f3.metric("My Unique Mobile Syncs", current_agent_unique_synced)
-    f4, f5, f6 = st.columns(3)
-    f4.metric("My Syncs Today", current_agent_synced_today)
-    f5.metric("My Failed Syncs", current_agent_failed)
-    f6.metric("My Last Mobile Activity", current_agent_last_activity)
-
-    if current_agent_failed == 0:
-        st.success("AGROW Field mobile sync health: no failed syncs recorded for this field user.")
+    if role == "admin":
+        scope_name = "All Nigeria" if selected_state == "All Nigeria" else normalize_state_name(selected_state)
+        st.caption(
+            f"Administrative field-operations summary for {scope_name}. Registration figures come from the Farmer Register; "
+            "mobile synchronization figures come from the AGROW Field device receipt trail."
+        )
     else:
-        st.warning(f"AGROW Field mobile sync health: {current_agent_failed} failed sync(s) require review.")
+        st.caption(
+            "Field-user operations summary. Registration figures come from the Farmer Register; "
+            "mobile synchronization figures come from the AGROW Field device receipt trail."
+        )
+
+    if role == "admin":
+        admin_registered = len(fresh_df)
+        admin_registered_today = 0
+        if not fresh_df.empty and "registration_date" in fresh_df.columns:
+            admin_registered_today = int(
+                fresh_df["registration_date"].astype(str).str.startswith(datetime.now().strftime("%Y-%m-%d")).sum()
+            )
+        admin_unique_synced = unique_farmers_synced
+        admin_synced_today = synced_today
+        admin_failed = field_failed_count
+        f1, f2, f3 = st.columns(3)
+        f1.metric("Registered Farmers", admin_registered)
+        f2.metric("Registered Today", admin_registered_today)
+        f3.metric("Unique Mobile Syncs", admin_unique_synced)
+        f4, f5, f6 = st.columns(3)
+        f4.metric("Syncs Today", admin_synced_today)
+        f5.metric("Failed Syncs", admin_failed)
+        f6.metric("Last Mobile Activity", last_received)
+    else:
+        current_agent_registered = 0
+        current_agent_registered_today = 0
+        current_agent_unique_synced = 0
+        current_agent_synced_today = 0
+        current_agent_failed = 0
+        current_agent_last_activity = "—"
+
+        if not agent_perf.empty and "agent_id" in agent_perf.columns:
+            current_agent_row = agent_perf[
+                agent_perf["agent_id"].astype(str).str.upper() == str(user_id).upper()
+            ]
+            if not current_agent_row.empty:
+                row = current_agent_row.iloc[0]
+                current_agent_registered = int(row.get("registered_farmers", 0) or 0)
+                current_agent_registered_today = int(row.get("registered_today", 0) or 0)
+                current_agent_unique_synced = int(row.get("unique_farmers_synced", 0) or 0)
+                current_agent_synced_today = int(row.get("synced_today", 0) or 0)
+                current_agent_failed = int(row.get("failed_syncs", 0) or 0)
+                last_activity_value = row.get("last_activity", pd.NaT)
+                if pd.notna(last_activity_value):
+                    current_agent_last_activity = str(last_activity_value)
+
+        f1, f2, f3 = st.columns(3)
+        f1.metric("My Registered Farmers", current_agent_registered)
+        f2.metric("My Registered Today", current_agent_registered_today)
+        f3.metric("My Unique Mobile Syncs", current_agent_unique_synced)
+        f4, f5, f6 = st.columns(3)
+        f4.metric("My Syncs Today", current_agent_synced_today)
+        f5.metric("My Failed Syncs", current_agent_failed)
+        f6.metric("My Last Mobile Activity", current_agent_last_activity)
+
+    if role == "admin":
+        if admin_failed == 0:
+            st.success("AGROW Field mobile sync health: no failed syncs recorded for the selected administrative scope.")
+        else:
+            st.warning(f"AGROW Field mobile sync health: {admin_failed} failed sync(s) require review in the selected administrative scope.")
+    else:
+        if current_agent_failed == 0:
+            st.success("AGROW Field mobile sync health: no failed syncs recorded for this field user.")
+        else:
+            st.warning(f"AGROW Field mobile sync health: {current_agent_failed} failed sync(s) require review.")
 
 
 def generate_farmer_qr_code(farmer_id: str):
@@ -3037,6 +3122,9 @@ def show_auth():
                 st.session_state.logged_in = True
                 st.session_state.user_id = normalized_login_user
                 st.session_state.role = user["role"]
+                st.session_state["require_admin_password_change"] = (
+                    str(user.get("role", "")).lower() == "admin" and normalized_login_pw == "agrow2026"
+                )
                 log_action(normalized_login_user, "LOGIN", "Successful login")
                 st.rerun()
             else:
@@ -3321,6 +3409,35 @@ else:
 
     user_meta = fetch_user(user_id) or {}
 
+    if role == "admin" and (
+        st.session_state.get("require_admin_password_change", False)
+        or str(user_meta.get("pw", "")).strip() == "agrow2026"
+    ):
+        st.markdown("## 🔐 Administrator Security Setup")
+        st.warning(
+            "This administrator account is still using the deployment password. "
+            "Create a private password before entering the operational workspace."
+        )
+        p1, p2 = st.columns(2)
+        with p1:
+            admin_new_pw = st.text_input("New Administrator Password", type="password", key="forced_admin_new_pw")
+        with p2:
+            admin_confirm_pw = st.text_input("Confirm New Password", type="password", key="forced_admin_confirm_pw")
+        if st.button("Set Private Administrator Password", type="primary", width="stretch", key="forced_admin_password_save"):
+            if len(admin_new_pw.strip()) < 8:
+                st.error("Administrator password must be at least 8 characters.")
+            elif admin_new_pw != admin_confirm_pw:
+                st.error("Passwords do not match.")
+            elif admin_new_pw.strip() == "agrow2026":
+                st.error("Choose a password different from the deployment password.")
+            else:
+                update_user_password(user_id, admin_new_pw.strip())
+                log_action(user_id, "ADMIN_PASSWORD_INITIALIZED", "Deployment password replaced")
+                st.session_state["require_admin_password_change"] = False
+                st.success("Administrator password secured. Opening workspace…")
+                st.rerun()
+        st.stop()
+
     # continue dashboard here...
 
     # logged-in dashboard continues here
@@ -3424,6 +3541,9 @@ else:
 
     if role == "admin":
         selected_state = st.sidebar.selectbox("Region Focus", ["All Nigeria"] + state_options)
+        view_label = "All Nigeria" if selected_state == "All Nigeria" else normalize_state_name(selected_state)
+        st.sidebar.success(f"Viewing: {view_label}")
+        st.info(f"📍 Administrator View: {view_label}")
     else:
         selected_state = user_meta.get("state", "All Nigeria")
         st.sidebar.info(f"Access restricted to {normalize_state_name(selected_state)}")
@@ -3500,7 +3620,7 @@ else:
     # TAB LAYOUT
     # =========================================================
     tab_dashboard, tab_farmer_registration, tab_distribution, tab_verification, tab_marketlink, tab_analytics = st.tabs(
-        ["📊 Dashboard", "📝 Farmer Registration", "📦 Distribution", "🔎 Farmer Verification", "🛒 MarketLink", "📈 Analytics"]
+        ["📊 Dashboard", "📝 Farmer Registration", "📦 Needs & Distribution", "🔎 Farmer Verification", "🛒 MarketLink", "📈 Analytics"]
     )
 
     # =========================================================
@@ -3511,8 +3631,9 @@ else:
 
         refresh_col, refresh_note_col = st.columns([1, 3])
         with refresh_col:
-            if st.button("↻ Refresh Live Data", key="dashboard_refresh_live_data", width="stretch"):
-                st.rerun()
+            with st.container(key="dashboard_refresh_action"):
+                if st.button("↻ Refresh Live Data", key="dashboard_refresh_live_data", width="stretch"):
+                    st.rerun()
         with refresh_note_col:
             st.caption("Headline registration metrics and sync activity refresh automatically every 10 seconds. Use Refresh Live Data for an immediate full dashboard update.")
 
@@ -3539,7 +3660,7 @@ else:
         st.markdown("### Data & Reporting")
         st.caption(
             "Download the complete non-image farmer register available within your current access scope. "
-            "The export retains identity, contact, location, crop, farm-size, input-distribution, verification, "
+            "The export retains identity, contact, location, crop, farm-size, support-needs, programme context, delivered-support, verification, "
             "GPS and enumerator fields for programme monitoring and further analysis."
         )
 
@@ -3677,6 +3798,12 @@ else:
 
         form_v = st.session_state.get("farmer_form_version", 0)
 
+        support_needs_options = [
+            "Improved Seeds", "Fertilizer", "Crop Protection", "Mechanization",
+            "Extension Support", "Irrigation / Water", "Credit / Finance", "Training",
+            "Storage", "Processing", "Market Access", "Livestock / Poultry Support", "Other"
+        ]
+
         input_options = [
             "Rice Seeds",
             "Maize Seeds",
@@ -3762,10 +3889,36 @@ else:
         farm_size = st.number_input("Farm Size (Hectares)", min_value=0.0, step=0.1, key=f"farm_size_{form_v}")
 
         st.markdown("---")
-        st.markdown("### Section 5: Support Delivered")
-        input_list = st.multiselect("Inputs Distributed", input_options, key=f"input_list_{form_v}")
+        st.markdown("### Section 5: Support Needs & Programme Context")
+        st.caption(
+            "Capture what the farmer currently needs. The farmer record remains reusable across programmes; "
+            "actual support delivery is recorded only where an intervention has already occurred."
+        )
+        support_needs = st.multiselect(
+            "Current Support Needs (Optional)", support_needs_options, key=f"support_needs_{form_v}"
+        )
+        support_col1, support_col2 = st.columns(2)
+        with support_col1:
+            support_priority = st.selectbox(
+                "Support Priority", ["Not Assessed", "High", "Medium", "Low"], key=f"support_priority_{form_v}"
+            )
+        with support_col2:
+            programme_name = st.text_input(
+                "Programme / Intervention Name (Optional)", key=f"programme_name_{form_v}"
+            )
+        support_already_delivered = st.checkbox(
+            "Support has already been delivered under this programme", key=f"support_delivered_flag_{form_v}"
+        )
+        if support_already_delivered:
+            input_list = st.multiselect(
+                "Inputs / Support Already Delivered", input_options, key=f"input_list_{form_v}"
+            )
+        else:
+            input_list = []
+            st.info(
+                "No delivered support recorded at registration. Delivery can be tracked later through Distribution / programme interventions."
+            )
         quantity_units = len(input_list)
-        st.caption(f"Total input types selected: {quantity_units}")
 
         st.markdown("---")
         st.markdown("### Section 6: NIN Verification")
@@ -3863,8 +4016,6 @@ else:
                 st.error("ID Number must be between 1 and 20 characters.")
             elif not farmer_lga or farmer_lga == "N/A":
                 st.error("LGA is required.")
-            elif len(input_list) == 0:
-                st.error("Please select at least one distributed input.")
             elif photo_capture is None:
                 st.error("Farmer photo capture is required.")
             elif latitude == 0.0 and longitude == 0.0:
@@ -3911,6 +4062,9 @@ else:
                     "Primary_Crop": primary_crop,
                     "Secondary_Crop": secondary_crop,
                     "Farm_Size_Ha": farm_size,
+                    "Support_Needs": ", ".join(support_needs),
+                    "Support_Priority": support_priority,
+                    "Programme_Name": programme_name.strip(),
                     "Input_Distributed": ", ".join(input_list),
                     "Quantity_Units": quantity_units,
                     "NIN_Status": nin_status,
@@ -3946,7 +4100,86 @@ else:
     # TAB 3: DISTRIBUTION
     # =========================================================
     with tab_distribution:
-        st.subheader("Input Breakdown")
+        st.subheader("Support Needs & Programme Interventions")
+        st.caption(
+            "Farmer registration captures demand intelligence. Programme delivery is then recorded as an intervention, "
+            "allowing one farmer record to participate in multiple programmes over time."
+        )
+
+        st.markdown("#### Support Needs / Demand Intelligence")
+        if not df.empty and "support_needs" in df.columns:
+            needs_counts = df["support_needs"].fillna("").str.split(", ").explode()
+            needs_counts = needs_counts[needs_counts != ""].value_counts().reset_index()
+            needs_counts.columns = ["Support_Need", "Farmers"]
+            if not needs_counts.empty:
+                st.dataframe(needs_counts, width="stretch", hide_index=True)
+            else:
+                st.info("No support-needs assessments have been recorded yet.")
+        else:
+            st.info("No support-needs assessments have been recorded yet.")
+
+        st.markdown("#### Record Programme Intervention")
+        if not df.empty:
+            farmer_choices = {
+                f"{str(r.get('farmer_full_name') or '-')} · {str(r.get('farmer_id') or '-')}": str(r.get('farmer_id') or '')
+                for _, r in df.iterrows()
+                if str(r.get('farmer_id') or '').strip()
+            }
+            if farmer_choices:
+                selected_farmer_label = st.selectbox("Farmer", list(farmer_choices.keys()), key="intervention_farmer")
+                selected_farmer_id = farmer_choices[selected_farmer_label]
+                i1, i2 = st.columns(2)
+                with i1:
+                    intervention_programme = st.text_input("Programme / Project Name", key="intervention_programme")
+                    intervention_type = st.selectbox(
+                        "Intervention Type",
+                        ["Input Support", "Training", "Extension Visit", "Mechanization", "Finance / Credit", "Irrigation", "Storage / Processing", "Market Access", "Other"],
+                        key="intervention_type",
+                    )
+                with i2:
+                    intervention_date = st.date_input("Intervention Date", key="intervention_date")
+                    intervention_status = st.selectbox("Status", ["Planned", "Scheduled", "Delivered", "Completed", "Cancelled"], index=2, key="intervention_status")
+                intervention_items = st.multiselect("Support / Inputs", PROGRAMME_SUPPORT_OPTIONS, key="intervention_items")
+                q1, q2 = st.columns(2)
+                with q1:
+                    intervention_quantity = st.number_input("Quantity", min_value=0.0, step=1.0, key="intervention_quantity")
+                with q2:
+                    intervention_unit = st.text_input("Unit", placeholder="e.g. kg, bags, session, service", key="intervention_unit")
+                intervention_remarks = st.text_area("Intervention Remarks", key="intervention_remarks")
+                if st.button("Save Programme Intervention", type="primary", width="stretch", key="save_programme_intervention"):
+                    if not intervention_programme.strip():
+                        st.error("Programme / Project Name is required.")
+                    elif not intervention_type:
+                        st.error("Intervention Type is required.")
+                    else:
+                        intervention_id = "INT-" + datetime.now().strftime("%Y%m%d%H%M%S%f")
+                        create_intervention({
+                            "Intervention_ID": intervention_id,
+                            "Farmer_ID": selected_farmer_id,
+                            "Programme_Name": intervention_programme.strip(),
+                            "Intervention_Type": intervention_type,
+                            "Support_Items": ", ".join(intervention_items),
+                            "Quantity": intervention_quantity,
+                            "Unit": intervention_unit.strip(),
+                            "Intervention_Date": str(intervention_date),
+                            "Status": intervention_status,
+                            "Agent_ID": user_id,
+                            "Remarks": intervention_remarks.strip(),
+                        })
+                        log_action(user_id, "PROGRAMME_INTERVENTION_RECORDED", f"{intervention_id} · {selected_farmer_id}")
+                        st.success(f"Programme intervention recorded: {intervention_id}")
+            else:
+                st.info("No farmers are available in the current access scope.")
+        else:
+            st.info("Register farmers before recording programme interventions.")
+
+        scoped_farmer_ids = df["farmer_id"].dropna().astype(str).tolist() if not df.empty and "farmer_id" in df.columns else []
+        intervention_df = fetch_interventions(scoped_farmer_ids) if scoped_farmer_ids else pd.DataFrame()
+        if not intervention_df.empty:
+            st.markdown("#### Recent Programme Interventions")
+            st.dataframe(intervention_df.head(100), width="stretch", hide_index=True)
+
+        st.markdown("#### Delivered Support Breakdown")
 
         if not df.empty:
             input_counts = df["input_distributed"].fillna("").str.split(", ").explode()
@@ -3978,7 +4211,7 @@ else:
             )
             st.plotly_chart(pie_fig, width="stretch")
         else:
-            st.info("No input distribution data available.")
+            st.info("No delivered-support data is attached to farmer registration records in the current scope.")
 
         st.subheader("📋 Master Registry Database")
 

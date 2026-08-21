@@ -1517,6 +1517,40 @@ def render_live_dashboard_overview(selected_state, role, user_id):
     row2[3].metric("Captured Photos", captured_photos)
 
 
+def _classify_sync_receipts(receipts_df: pd.DataFrame) -> pd.DataFrame:
+    """Classify historical FAILED receipts as RESOLVED once the same farmer+agent later syncs.
+
+    The database audit trail remains unchanged. This helper only changes how the
+    dashboard interprets receipt health:
+      - SYNCED stays SYNCED
+      - FAILED with a successful receipt for the same farmer+agent becomes RESOLVED
+      - FAILED without a successful receipt remains FAILED
+    """
+    if receipts_df is None or receipts_df.empty:
+        return pd.DataFrame() if receipts_df is None else receipts_df.copy()
+
+    out = receipts_df.copy()
+    out["sync_status_norm"] = out["sync_status"].fillna("").astype(str).str.upper().str.strip()
+    out["farmer_key"] = out.get("farmer_id", pd.Series("", index=out.index)).fillna("").astype(str).str.upper().str.strip()
+    out["agent_key"] = out.get("agent_id", pd.Series("", index=out.index)).fillna("").astype(str).str.upper().str.strip()
+
+    successful_pairs = set(
+        zip(
+            out.loc[out["sync_status_norm"].eq("SYNCED"), "farmer_key"],
+            out.loc[out["sync_status_norm"].eq("SYNCED"), "agent_key"],
+        )
+    )
+
+    def effective_status(row):
+        raw = row["sync_status_norm"]
+        if raw == "FAILED" and (row["farmer_key"], row["agent_key"]) in successful_pairs:
+            return "RESOLVED"
+        return raw or "UNKNOWN"
+
+    out["effective_sync_status"] = out.apply(effective_status, axis=1)
+    return out
+
+
 def _build_agent_performance(farmers_df: pd.DataFrame, receipts_df: pd.DataFrame) -> pd.DataFrame:
     """Build registration + device-sync performance from fresh authoritative data."""
     receipt_perf = pd.DataFrame()
@@ -1524,15 +1558,14 @@ def _build_agent_performance(farmers_df: pd.DataFrame, receipts_df: pd.DataFrame
     today_date = pd.Timestamp.now().date()
 
     if receipts_df is not None and not receipts_df.empty:
-        rp = receipts_df.copy()
+        rp = _classify_sync_receipts(receipts_df)
         rp["received_at_dt"] = pd.to_datetime(rp.get("received_at"), errors="coerce")
-        rp["sync_status_norm"] = rp["sync_status"].astype(str).str.upper()
 
         receipt_perf = (
             rp.groupby("agent_id", dropna=False)
             .agg(
                 total_sync_receipts=("sync_status_norm", lambda s: int((s == "SYNCED").sum())),
-                failed_syncs=("sync_status_norm", lambda s: int((s == "FAILED").sum())),
+                failed_syncs=("effective_sync_status", lambda s: int((s == "FAILED").sum())),
                 last_activity=("received_at_dt", "max"),
             )
             .reset_index()
@@ -1652,12 +1685,12 @@ def render_live_sync_monitor(selected_state, role, user_id):
     last_received = "—"
 
     if not receipts_df.empty:
-        receipts_work = receipts_df.copy()
+        receipts_work = _classify_sync_receipts(receipts_df)
         receipts_work["received_at_dt"] = pd.to_datetime(receipts_work.get("received_at"), errors="coerce")
-        synced_mask = receipts_work["sync_status"].astype(str).str.upper().eq("SYNCED")
-        failed_mask = receipts_work["sync_status"].astype(str).str.upper().eq("FAILED")
+        synced_mask = receipts_work["sync_status_norm"].eq("SYNCED")
+        unresolved_failed_mask = receipts_work["effective_sync_status"].eq("FAILED")
         total_sync_receipts = int(synced_mask.sum())
-        field_failed_count = int(failed_mask.sum())
+        field_failed_count = int(unresolved_failed_mask.sum())
 
         if "farmer_id" in receipts_work.columns:
             unique_farmers_synced = int(
@@ -1680,11 +1713,17 @@ def render_live_sync_monitor(selected_state, role, user_id):
     q1.metric("Total Sync Receipts", total_sync_receipts)
     q2.metric("Unique Farmers Synced", unique_farmers_synced)
     q3.metric("Synced Today", synced_today)
-    q4.metric("Failed Syncs", field_failed_count)
+    q4.metric("Unresolved Sync Failures", field_failed_count)
     st.metric("Last Device Receipt", last_received)
 
     if not receipts_df.empty:
-        st.dataframe(receipts_df.head(50), width="stretch")
+        display_receipts = _classify_sync_receipts(receipts_df).copy()
+        display_receipts["sync_status"] = display_receipts["effective_sync_status"]
+        display_receipts = display_receipts.drop(
+            columns=["sync_status_norm", "effective_sync_status", "farmer_key", "agent_key"],
+            errors="ignore",
+        )
+        st.dataframe(display_receipts.head(50), width="stretch")
     else:
         st.info("No AGROW Field device sync receipts have reached the central database yet.")
 
@@ -1728,7 +1767,7 @@ def render_live_sync_monitor(selected_state, role, user_id):
         f3.metric("Unique Mobile Syncs", admin_unique_synced)
         f4, f5, f6 = st.columns(3)
         f4.metric("Syncs Today", admin_synced_today)
-        f5.metric("Failed Syncs", admin_failed)
+        f5.metric("Unresolved Sync Failures", admin_failed)
         f6.metric("Last Mobile Activity", last_received)
     else:
         current_agent_registered = 0
@@ -1759,19 +1798,19 @@ def render_live_sync_monitor(selected_state, role, user_id):
         f3.metric("My Unique Mobile Syncs", current_agent_unique_synced)
         f4, f5, f6 = st.columns(3)
         f4.metric("My Syncs Today", current_agent_synced_today)
-        f5.metric("My Failed Syncs", current_agent_failed)
+        f5.metric("My Unresolved Sync Failures", current_agent_failed)
         f6.metric("My Last Mobile Activity", current_agent_last_activity)
 
     if role == "admin":
         if admin_failed == 0:
-            st.success("AGROW Field mobile sync health: no failed syncs recorded for the selected administrative scope.")
+            st.success("AGROW Field mobile sync health: no unresolved sync failures in the selected administrative scope.")
         else:
-            st.warning(f"AGROW Field mobile sync health: {admin_failed} failed sync(s) require review in the selected administrative scope.")
+            st.warning(f"AGROW Field mobile sync health: {admin_failed} unresolved sync failure(s) require review in the selected administrative scope.")
     else:
         if current_agent_failed == 0:
-            st.success("AGROW Field mobile sync health: no failed syncs recorded for this field user.")
+            st.success("AGROW Field mobile sync health: no unresolved sync failures for this field user.")
         else:
-            st.warning(f"AGROW Field mobile sync health: {current_agent_failed} failed sync(s) require review.")
+            st.warning(f"AGROW Field mobile sync health: {current_agent_failed} unresolved sync failure(s) require review.")
 
 
 def generate_farmer_qr_code(farmer_id: str):

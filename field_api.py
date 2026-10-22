@@ -252,3 +252,11 @@ def root(): return FileResponse(STATIC/'index.html')
 def manifest(): return FileResponse(STATIC/'manifest.webmanifest', media_type='application/manifest+json')
 @app.get('/sw.js')
 def sw(): return FileResponse(STATIC/'sw.js', media_type='application/javascript')
+
+# Phase 1.6A: additive GPS farm measurement routes.
+from farm_measurement_api import router as farm_measurement_router
+app.include_router(farm_measurement_router)
+
+@app.get('/measure-farm')
+def measure_farm_page():
+    return FileResponse(STATIC / 'measure.html')

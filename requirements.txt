@@ -11,3 +11,4 @@ reportlab
 streamlit-geolocation
 fastapi
 uvicorn
+psycopg[binary]>=3.2,<4

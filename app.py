@@ -2,7 +2,8 @@ import os
 import socket
 import qrcode
 from io import BytesIO
-from datetime import datetime
+from datetime import datetime, date
+from zoneinfo import ZoneInfo
 import hmac
 import hashlib
 import time
@@ -22,7 +23,7 @@ from sqlalchemy import text
 
 from nigeria_lga_data import NIGERIA_LGA_MAP
 from core.db import get_connection, init_db, get_engine, DB_BACKEND
-from core.config import AGENT_PHOTO_DIR
+from core.config import AGENT_PHOTO_DIR, FARMER_PHOTO_DIR
 from core.settings import invite_code_matches, get_invite_source, get_organisation_invite_code
 from services.log_service import log_action
 from services.farmer_service import (
@@ -30,6 +31,8 @@ from services.farmer_service import (
     farmer_exists_today,
     insert_farmer,
     save_to_offline_queue,
+    fetch_offline_queue,
+    sync_offline_queue,
 )
 from services.user_service import (
     fetch_user,
@@ -299,6 +302,11 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="collapsed",
 )
+
+st.markdown("""<style>
+[data-testid="stMetricLabel"] p { white-space: normal !important; overflow: visible !important; text-overflow: clip !important; line-height: 1.15 !important; }
+[data-testid="stMetricValue"] { overflow: visible !important; }
+</style>""", unsafe_allow_html=True)
 
 # =========================================================
 # 2. ENV / DATABASE
@@ -1003,12 +1011,141 @@ def get_logo_path():
 
 
 def normalize_state_name(state_name: str) -> str:
-    if state_name == "FCT":
+    """Canonical display/key name for state data, including Abuja/FCT aliases.
+
+    This normalizes labels in memory; it never rewrites farmer records.
+    """
+    name = " ".join(str(state_name or "").strip().split())
+    key = name.casefold().replace("-", " ")
+    if key in {
+        "fct", "abuja", "federal capital territory",
+        "abuja federal capital territory", "federal capital territory abuja",
+        "f.c.t.",
+    }:
         return "Federal Capital Territory"
-    return state_name
+    return name
 
-FARMER_PHOTO_DIR = os.path.join("uploads", "farmers")
+# Administrative centroids are used only for state-level Command Centre aggregation.
+# They are NOT farm GPS coordinates and must never be written into farmer records.
+STATE_ADMIN_CENTROIDS = {
+    "Abia": (5.45, 7.52), "Adamawa": (9.33, 12.40), "Akwa Ibom": (5.00, 7.85),
+    "Anambra": (6.20, 7.00), "Bauchi": (10.31, 9.84), "Bayelsa": (4.77, 6.07),
+    "Benue": (7.34, 8.75), "Borno": (11.83, 13.15), "Cross River": (5.87, 8.60),
+    "Delta": (5.68, 5.90), "Ebonyi": (6.26, 8.01), "Edo": (6.34, 5.63),
+    "Ekiti": (7.67, 5.31), "Enugu": (6.45, 7.50), "Federal Capital Territory": (9.08, 7.40),
+    "Gombe": (10.29, 11.17), "Imo": (5.49, 7.03), "Jigawa": (12.23, 9.35),
+    "Kaduna": (10.52, 7.44), "Kano": (12.00, 8.52), "Katsina": (12.99, 7.60),
+    "Kebbi": (12.45, 4.20), "Kogi": (7.80, 6.74), "Kwara": (8.97, 4.56),
+    "Lagos": (6.52, 3.38), "Nasarawa": (8.54, 8.32), "Niger": (9.93, 5.60),
+    "Ogun": (7.16, 3.35), "Ondo": (7.25, 5.19), "Osun": (7.56, 4.52),
+    "Oyo": (8.16, 3.62), "Plateau": (9.22, 9.52), "Rivers": (4.84, 6.99),
+    "Sokoto": (13.06, 5.24), "Taraba": (8.00, 10.50), "Yobe": (12.29, 11.44),
+    "Zamfara": (12.17, 6.66),
+}
 
+def _normalise_scope_state(value):
+    value = str(value or "").strip()
+    return "Federal Capital Territory" if value == "FCT" else value
+
+def _programme_access_rows(username):
+    """Return programme memberships for a user. Legacy accounts fall back to their user geography."""
+    try:
+        with get_engine().connect() as conn:
+            rows = conn.execute(text("""
+                SELECT upa.programme_code, p.programme_name, p.organisation_code, p.scope_type, upa.access_role,
+                       upa.state, upa.lga
+                FROM user_programme_access upa
+                JOIN programmes p ON p.programme_code = upa.programme_code
+                WHERE UPPER(upa.username)=UPPER(:u) AND COALESCE(p.status,'Active')='Active'
+                ORDER BY p.programme_name, upa.state, upa.lga
+            """), {"u": username}).mappings().all()
+            return [dict(r) for r in rows]
+    except Exception:
+        return []
+
+def _programme_states(programme_code):
+    try:
+        with get_engine().connect() as conn:
+            rows = conn.execute(text("""
+                SELECT state FROM programme_states WHERE programme_code=:p ORDER BY state
+            """), {"p": programme_code}).fetchall()
+        return [_normalise_scope_state(r[0]) for r in rows]
+    except Exception:
+        return []
+
+def ensure_default_programme_access(username, role, user_meta):
+    """Backward-compatible bootstrap so existing demo accounts remain usable after Phase 1.4.
+
+    ADMIN receives a national demo programme. Existing state/agent accounts receive a programme
+    limited to their stored State (and LGA for agents). New deployments can replace these bootstrap
+    assignments with institution-specific programme memberships without changing the access engine.
+    """
+    if _programme_access_rows(username):
+        return
+    state = _normalise_scope_state(user_meta.get("state"))
+    lga = str(user_meta.get("lga_coverage") or "").strip()
+    role_l = str(role or "").lower()
+    now = datetime.now(ZoneInfo("Africa/Lagos")).isoformat(timespec="seconds")
+    try:
+        with get_engine().begin() as conn:
+            if role_l == "admin" and (str(username).upper()=="ADMIN" or state in {"All Nigeria","National",""}):
+                code, name, scope = "AGROW-NATIONAL-DEMO", "AGROW National Demo Programme", "NATIONAL"
+                conn.execute(text("INSERT INTO programmes(programme_code,programme_name,organisation_code,scope_type,status,created_at) VALUES(:c,:n,'DATADEV-DEMO',:s,'Active',:d) ON CONFLICT(programme_code) DO NOTHING"), {"c":code,"n":name,"s":scope,"d":now})
+                for stname in sorted(NIGERIA_LGA_MAP.keys()):
+                    conn.execute(text("INSERT INTO programme_states(programme_code,state) VALUES(:c,:s) ON CONFLICT(programme_code,state) DO NOTHING"), {"c":code,"s":_normalise_scope_state(stname)})
+                conn.execute(text("INSERT INTO user_programme_access(username,programme_code,access_role,state,lga) VALUES(:u,:c,'NATIONAL_ADMIN',NULL,NULL) ON CONFLICT DO NOTHING"), {"u":username,"c":code})
+            elif state:
+                code = "LEGACY-" + re.sub(r'[^A-Z0-9]+','-',state.upper()).strip('-')
+                name, scope = f"{state} Programme", "STATE"
+                conn.execute(text("INSERT INTO programmes(programme_code,programme_name,organisation_code,scope_type,status,created_at) VALUES(:c,:n,'DATADEV-DEMO',:s,'Active',:d) ON CONFLICT(programme_code) DO NOTHING"), {"c":code,"n":name,"s":scope,"d":now})
+                conn.execute(text("INSERT INTO programme_states(programme_code,state) VALUES(:c,:s) ON CONFLICT(programme_code,state) DO NOTHING"), {"c":code,"s":state})
+                access_role = "STATE_ADMIN" if role_l=="admin" else "AGENT"
+                conn.execute(text("INSERT INTO user_programme_access(username,programme_code,access_role,state,lga) VALUES(:u,:c,:r,:s,:l) ON CONFLICT DO NOTHING"), {"u":username,"c":code,"r":access_role,"s":state,"l":lga if role_l=="agent" else None})
+    except Exception:
+        pass
+
+def get_geographic_authorisation(role, user_meta, username=None, programme_code=None):
+    """Resolve effective access as Role × Programme × Assigned Geography."""
+    role_l = str(role or "").lower()
+    username = username or st.session_state.get("user_id", "")
+    memberships = _programme_access_rows(username) if username else []
+    if programme_code:
+        memberships = [m for m in memberships if m.get("programme_code")==programme_code]
+    if memberships:
+        programme = memberships[0]
+        pcode = programme["programme_code"]
+        pscope = str(programme.get("scope_type") or "STATE").upper()
+        p_states = _programme_states(pcode)
+        explicit_states = [_normalise_scope_state(m.get("state")) for m in memberships if m.get("state")]
+        if explicit_states:
+            p_states = sorted(set(p_states).intersection(explicit_states) or set(explicit_states))
+        access_roles = {str(m.get("access_role") or "").upper() for m in memberships}
+        if "AGENT" in access_roles or role_l=="agent":
+            lgas = [str(m.get("lga") or "").strip() for m in memberships if m.get("lga")]
+            return {"scope":"AGENT","organisation_code":programme.get("organisation_code"),"programme_code":pcode,"programme_name":programme["programme_name"],"programme_scope":pscope,"states":p_states,"lgas":lgas}
+        scope = "NATIONAL" if pscope=="NATIONAL" else ("MULTI_STATE" if len(p_states)>1 or pscope=="MULTI_STATE" else "STATE")
+        return {"scope":scope,"organisation_code":programme.get("organisation_code"),"programme_code":pcode,"programme_name":programme["programme_name"],"programme_scope":pscope,"states":p_states,"lgas":None}
+
+    # Safe legacy fallback if database migration has not yet created programme membership.
+    assigned_state = _normalise_scope_state(user_meta.get("state"))
+    assigned_lga = str(user_meta.get("lga_coverage") or "").strip()
+    if role_l == "admin" and assigned_state in {"All Nigeria", "National", ""}:
+        return {"scope":"NATIONAL","programme_code":None,"programme_name":"Legacy National Scope","programme_scope":"NATIONAL","states":sorted(NIGERIA_LGA_MAP.keys()),"lgas":None}
+    if assigned_state:
+        return {"scope":"STATE" if role_l=="admin" else "AGENT","programme_code":None,"programme_name":"Legacy Geographic Scope","programme_scope":"STATE","states":[assigned_state],"lgas":None if role_l=="admin" else [assigned_lga]}
+    return {"scope":"NONE","programme_code":None,"programme_name":"No Programme Assigned","programme_scope":"NONE","states":[],"lgas":[]}
+
+def registration_geography_allowed(role, user_meta, state, lga, username=None, programme_code=None):
+    auth = get_geographic_authorisation(role, user_meta, username, programme_code)
+    state_n = _normalise_scope_state(state)
+    allowed_states = {_normalise_scope_state(x) for x in auth["states"]}
+    if state_n not in allowed_states:
+        return False, f"Your account is not authorised by this programme to register farmers in {state_n or 'this state'}."
+    if auth["scope"] == "AGENT":
+        allowed_lgas = {str(x).strip() for x in (auth.get("lgas") or []) if str(x).strip()}
+        if str(lga or "").strip() not in allowed_lgas:
+            return False, f"Your programme assignment does not authorise farmer registration in {lga or 'this LGA'}."
+    return True, ""
 
 def save_uploaded_photo(photo_file, folder: str, filename: str) -> str:
     """Save an uploaded/camera image and return a portable project-relative path.
@@ -1455,11 +1592,90 @@ def is_db_available() -> bool:
     except Exception:
         return False
     
+def is_operational_online() -> bool:
+    """True when AGROW is allowed to write directly to the main database.
+
+    The manual Offline toggle is a controlled queue/capture mode. It is useful
+    for field workflow testing while the Streamlit server is still reachable.
+    True device-level no-network operation remains the responsibility of the
+    offline-first AGROW Field app.
+    """
+    return (not st.session_state.get("force_offline_mode", False)) and is_db_available()
+
+
+def fetch_measured_land_by_state() -> pd.DataFrame:
+    """Aggregate verified/captured farm measurements without changing farmer master records."""
+    try:
+        with get_engine().connect() as conn:
+            rows = conn.execute(text("""
+                SELECT state,
+                       COALESCE(SUM(COALESCE(measured_area_ha,0)),0) AS measured_land_ha,
+                       SUM(CASE WHEN measured_area_ha IS NOT NULL AND measured_area_ha > 0 THEN 1 ELSE 0 END) AS measured_farms,
+                       COUNT(*) AS farm_records
+                FROM farms
+                GROUP BY state
+            """)).mappings().all()
+        return pd.DataFrame([dict(r) for r in rows])
+    except Exception:
+        return pd.DataFrame(columns=["state","measured_land_ha","measured_farms","farm_records"])
+
+
+def calculate_age_years(date_value, as_of=None):
+    """Return completed years from a stored DOB; None when DOB is missing/invalid."""
+    if date_value is None or str(date_value).strip() in ("", "None", "NaT"):
+        return None
+    try:
+        dob = pd.to_datetime(date_value, errors="coerce")
+        if pd.isna(dob):
+            return None
+        ref = pd.Timestamp(as_of or datetime.now().date())
+        return int(ref.year - dob.year - ((ref.month, ref.day) < (dob.month, dob.day)))
+    except Exception:
+        return None
+
+
+def add_me_age_fields(df: pd.DataFrame) -> pd.DataFrame:
+    """Add derived Age and M&E age-band fields without duplicating DOB in storage.
+
+    Youth is shown using a configurable programme convention of 18-35 years.
+    Institutions can change this definition for a specific programme/report.
+    """
+    if df is None or df.empty:
+        return pd.DataFrame() if df is None else df.copy()
+    out = df.copy()
+    if "date_of_birth" in out.columns:
+        out["Age"] = out["date_of_birth"].apply(calculate_age_years)
+    elif "Date_of_Birth" in out.columns:
+        out["Age"] = out["Date_of_Birth"].apply(calculate_age_years)
+    else:
+        out["Age"] = None
+    def band(v):
+        try:
+            a = int(v)
+        except Exception:
+            return "Age not stated"
+        if a < 18: return "Under 18"
+        if a <= 35: return "Youth (18-35)"
+        if a <= 59: return "Adult (36-59)"
+        return "60+"
+    out["M&E_Age_Band"] = out["Age"].apply(band)
+    out["Youth_18_35"] = out["Age"].apply(lambda a: bool(pd.notna(a) and 18 <= int(a) <= 35))
+    return out
+
+
 def _fetch_scoped_dashboard_farmers(selected_state, role, user_id) -> pd.DataFrame:
     """Fetch a fresh Farmer Register view for live dashboard fragments."""
     fresh_df = fetch_farmers()
     if fresh_df is None or fresh_df.empty:
         return pd.DataFrame()
+
+    # Phase 1.4B tenant isolation: never expose another organisation/programme's operational rows.
+    active_org = st.session_state.get("active_organisation_code")
+    active_programme = st.session_state.get("active_programme_code")
+    if active_org and "organisation_code" in fresh_df.columns:
+        fresh_df = fresh_df[fresh_df["organisation_code"].fillna("") == active_org]
+    if active_programme and "programme_code" in fresh_df.columns:
+        fresh_df = fresh_df[fresh_df["programme_code"].fillna("") == active_programme]
 
     if selected_state != "All Nigeria" and "state" in fresh_df.columns:
         fresh_df = fresh_df[fresh_df["state"] == selected_state]
@@ -1470,7 +1686,7 @@ def _fetch_scoped_dashboard_farmers(selected_state, role, user_id) -> pd.DataFra
             == str(user_id or "").upper()
         ]
 
-    return fresh_df.copy()
+    return add_me_age_fields(fresh_df.copy())
 
 
 @st.fragment(run_every="10s")
@@ -1517,6 +1733,323 @@ def render_live_dashboard_overview(selected_state, role, user_id):
     row2[3].metric("Captured Photos", captured_photos)
 
 
+
+def ensure_seed_advisories():
+    """Seed a small general-practice library; institution/crop-specific advice can replace it."""
+    try:
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        seeds = [
+            ("ADV-LAND-001", "Land preparation: start with the field, not the input", "Land Preparation", "All Crops", "Pre-season", "Pre-planting",
+             "Inspect the field, confirm the production boundary and understand drainage, slope, previous crop and weed pressure before land preparation. Match tillage intensity to soil condition and the crop to avoid unnecessary soil disturbance.",
+             "Measure the plot; inspect drainage; clear responsibly; plan erosion control; use soil-test results where available.",
+             "Land preparation methods vary by soil, slope, rainfall and crop. Validate the final practice with a qualified local agronomist or extension service."),
+            ("ADV-FERT-001", "Fertilizer timing: apply to crop need and field condition", "Fertilizer", "All Crops", "In-season", "Establishment / Vegetative",
+             "Do not treat fertilizer as a one-time generic activity. Record the crop, planting date, growth stage, soil condition and the recommended nutrient plan. Where split application is recommended, schedule each application and verify it in the field.",
+             "Confirm crop and stage; check soil/moisture condition; use the approved product and rate; record date and quantity; verify application; follow up on crop response.",
+             "Exact fertilizer type, rate and timing are crop-, soil- and location-specific. AGROW should not prescribe a universal rate; use soil-test and locally approved agronomic recommendations."),
+            ("ADV-YIELD-001", "Protect yield through timely field monitoring", "Best Practice", "All Crops", "In-season", "General",
+             "Yield protection depends on timely observation. Monitor crop establishment, weeds, nutrient symptoms, pests, diseases, water stress and field operations against the production plan, and escalate exceptions early.",
+             "Schedule field visits; capture geotagged evidence; compare actual crop stage with plan; record exceptions; assign corrective actions; close resolved issues.",
+             "Symptoms can have multiple causes. Escalate uncertain pest, disease or nutrient problems to a qualified agronomist before treatment."),
+            ("ADV-HARV-001", "Plan harvest and post-harvest handling before maturity", "Harvest & Post-Harvest", "All Crops", "Late season", "Pre-harvest",
+             "Prepare labour, harvesting equipment, drying, storage, aggregation and buyer arrangements before the crop reaches harvest maturity. Record harvested area, quantity, quality and losses so that actual yield can be compared with the production target.",
+             "Confirm maturity; prepare clean handling/storage; measure harvested area; weigh output; record losses; grade produce; connect available quantity to MarketLink/offtake.",
+             "Harvest maturity and handling requirements differ by commodity; use commodity-specific guidance."),
+        ]
+        with get_engine().begin() as conn:
+            for row in seeds:
+                exists = conn.execute(text("SELECT 1 FROM advisory_posts WHERE advisory_id=:id"), {"id": row[0]}).first()
+                if not exists:
+                    conn.execute(text("""
+                        INSERT INTO advisory_posts
+                        (advisory_id,title,topic,crop,season,state,growth_stage,message,action_points,caution_note,priority,status,published_by,published_at)
+                        VALUES (:id,:title,:topic,:crop,:season,'All Nigeria',:stage,:message,:actions,:caution,'Normal','Published','AGROW Knowledge Base',:published)
+                    """), dict(id=row[0], title=row[1], topic=row[2], crop=row[3], season=row[4], stage=row[5], message=row[6], actions=row[7], caution=row[8], published=now))
+    except Exception:
+        pass
+
+
+def fetch_advisory_posts(state="All Nigeria", crop="All Crops", topic="All Topics"):
+    ensure_seed_advisories()
+    try:
+        with get_engine().connect() as conn:
+            rows = conn.execute(text("""
+                SELECT advisory_id,title,topic,crop,season,state,growth_stage,message,action_points,
+                       caution_note,priority,published_by,published_at
+                FROM advisory_posts
+                WHERE UPPER(status)='PUBLISHED'
+                ORDER BY CASE UPPER(priority) WHEN 'URGENT' THEN 1 WHEN 'HIGH' THEN 2 ELSE 3 END, id DESC
+            """)).mappings().all()
+        df = pd.DataFrame([dict(r) for r in rows])
+        if df.empty:
+            return df
+        if state != "All Nigeria":
+            df = df[df["state"].isin(["All Nigeria", state])]
+        if crop != "All Crops":
+            df = df[df["crop"].isin(["All Crops", crop])]
+        if topic != "All Topics":
+            df = df[df["topic"] == topic]
+        return df
+    except Exception:
+        return pd.DataFrame()
+
+
+@st.dialog("🌱 AGROW Farm Practice Forum", width="large")
+def show_farm_practice_forum(selected_state="All Nigeria"):
+    st.caption("Seasonal agronomic guidance and field-practice reminders. Filter advice to the production context before acting.")
+    all_posts = fetch_advisory_posts(selected_state)
+    if all_posts.empty:
+        st.info("No advisory posts are currently published.")
+        return
+    f1, f2 = st.columns(2)
+    crops = ["All Crops"] + sorted([x for x in all_posts["crop"].dropna().unique().tolist() if x != "All Crops"])
+    topics = ["All Topics"] + sorted(all_posts["topic"].dropna().unique().tolist())
+    crop = f1.selectbox("Crop", crops, key="forum_crop")
+    topic = f2.selectbox("Topic", topics, key="forum_topic")
+    posts = fetch_advisory_posts(selected_state, crop, topic)
+    for _, post in posts.iterrows():
+        priority = str(post.get("priority") or "Normal")
+        st.markdown(f"#### {post['title']}")
+        st.caption(f"{post['topic']} • {post.get('season','')} • {post.get('growth_stage','')} • Priority: {priority}")
+        st.write(post["message"])
+        if post.get("action_points"):
+            st.markdown("**Field actions:** " + str(post["action_points"]))
+        if post.get("caution_note"):
+            st.info(str(post["caution_note"]))
+        st.divider()
+
+
+def render_advisory_strip(selected_state="All Nigeria"):
+    posts = fetch_advisory_posts(selected_state)
+    if posts.empty:
+        return
+    post = posts.iloc[0]
+    c1, c2 = st.columns([4, 1])
+    with c1:
+        st.markdown(f"**🌱 Farm Practice Forum — {post['title']}**")
+        st.caption(str(post['message'])[:230] + ("…" if len(str(post['message'])) > 230 else ""))
+    with c2:
+        if st.button("Open Forum", key="open_agrow_forum", use_container_width=True, type="primary"):
+            show_farm_practice_forum(selected_state)
+
+
+from agrow_gis import state_map, lga_map, canonical as gis_canonical
+
+def render_interactive_state_intelligence(df: pd.DataFrame, selected_scope="All Nigeria"):
+    """Map-led AGROW Command Centre: hover for a snapshot, click for a synchronized intelligence panel."""
+    st.markdown("### 🗺️ AGROW Interactive Command Centre")
+    st.caption("Hover over a state marker for an instant snapshot. Click a state to synchronize the intelligence panel; use Explore State to drill into LGAs.")
+    # Keep the polygon map and the intelligence panel available even when there
+    # are no farmer records in the selected programme/state scope.
+    if df is None:
+        df = pd.DataFrame()
+    if df.empty:
+        df = pd.DataFrame(columns=["state", "farmer_id", "farm_size_ha", "lga", "primary_crop"])
+    if not {"state", "farmer_id"}.issubset(df.columns):
+        st.error("State and farmer identifiers are unavailable; geographic statistics cannot be calculated.")
+        return
+    for field in ("farm_size_ha", "lga", "primary_crop"):
+        if field not in df.columns:
+            df = df.copy()
+            df[field] = pd.Series(index=df.index, dtype="object")
+
+    base = add_me_age_fields(df)
+    geo = base.copy()
+    # State intelligence is administrative: every registered farmer contributes even
+    # when farm GPS is not yet captured. State centroids position the aggregate marker;
+    # genuine farm GPS remains a separate evidence layer and is never fabricated.
+    geo["State"] = geo["state"].apply(normalize_state_name)
+    agg = geo.groupby("State", dropna=False).agg(
+        Farmers=("farmer_id", "count"),
+        Land_Ha=("farm_size_ha", lambda x: pd.to_numeric(x, errors="coerce").fillna(0).sum()),
+        LGAs=("lga", "nunique"), Commodities=("primary_crop", "nunique"),
+        Youth=("Youth_18_35", "sum"),
+    ).reset_index()
+    agg["Latitude"] = agg["State"].map(lambda x: STATE_ADMIN_CENTROIDS.get(x, (None, None))[0])
+    agg["Longitude"] = agg["State"].map(lambda x: STATE_ADMIN_CENTROIDS.get(x, (None, None))[1])
+    agg = agg.dropna(subset=["Latitude", "Longitude"])
+    # An empty aggregate is valid: polygon geometry still renders for all states.
+    agg["Youth_Pct"] = (agg["Youth"] / agg["Farmers"].replace(0, pd.NA) * 100).fillna(0).round(1)
+
+    measured = fetch_measured_land_by_state()
+    if not measured.empty:
+        measured["State"] = measured["state"].apply(normalize_state_name)
+        measured = measured.groupby("State", as_index=False)[
+            ["measured_land_ha", "measured_farms", "farm_records"]
+        ].sum()
+        agg = agg.merge(measured[["State","measured_land_ha","measured_farms","farm_records"]], on="State", how="left")
+    for col in ["measured_land_ha","measured_farms","farm_records"]:
+        if col not in agg.columns:
+            agg[col] = 0
+        agg[col] = pd.to_numeric(agg[col], errors="coerce").fillna(0)
+    agg["Measurement_Coverage_Pct"] = (agg["measured_farms"] / agg["Farmers"].replace(0, pd.NA) * 100).fillna(0).clip(upper=100).round(1)
+
+    # Maintain a scope-aware map selection. Sidebar changes override stale clicks.
+    scope_key = normalize_state_name(selected_scope)
+    if st.session_state.get('agrow_map_scope_last') != scope_key:
+        st.session_state['agrow_map_scope_last'] = scope_key
+        st.session_state['agrow_selected_state_intel'] = None if selected_scope == 'All Nigeria' else scope_key
+        st.session_state['agrow_map_event_generation'] = st.session_state.get('agrow_map_event_generation', 0) + 1
+    map_selection = st.session_state.get('agrow_selected_state_intel')
+    left, right = st.columns([1.05, 2.15], gap="medium")
+    with right:
+        map_focus = map_selection or selected_scope
+        polygon_fig, polygon_names = state_map(agg, map_focus)
+        if st.button('↺ Reset Map', key='agrow_command_centre_reset_map', help='Clear map selection and restore the current programme geography'):
+            st.session_state['agrow_selected_state_intel'] = None if selected_scope == 'All Nigeria' else scope_key
+            st.session_state['agrow_map_event_generation'] = st.session_state.get('agrow_map_event_generation', 0) + 1
+            st.session_state['agrow_explore_lga'] = False
+            st.rerun()
+        if polygon_fig is not None:
+            st.caption("Administrative boundaries: geoBoundaries (CC BY 4.0). Grey = no records; sage = records; dark green = selected region. Not farm GPS evidence.")
+            event = st.plotly_chart(polygon_fig, use_container_width=True, on_select="rerun", selection_mode="points", key=f"agrow_polygon_map_v1_{st.session_state.get('agrow_map_event_generation', 0)}")
+        else:
+            fig = px.scatter_geo(
+                agg, lat="Latitude", lon="Longitude", size="Farmers", hover_name="State",
+                hover_data={"Farmers":True,"Land_Ha":":.1f","measured_land_ha":":.1f","Measurement_Coverage_Pct":":.1f","LGAs":True,"Commodities":True,"Youth":True,"Youth_Pct":":.1f","Latitude":False,"Longitude":False},
+                scope="africa", size_max=38
+            )
+            fig.update_traces(hovertemplate=(
+                "<b>%{hovertext}</b><br>Farmers: %{customdata[0]:,.0f}<br>Declared land: %{customdata[1]:,.1f} ha"
+                "<br>Measured land: %{customdata[2]:,.1f} ha<br>Measurement coverage: %{customdata[3]:.1f}%"
+                "<br>LGAs: %{customdata[4]}<br>Commodities: %{customdata[5]}<br>Youth (18-35): %{customdata[6]:,.0f} (%{customdata[7]:.1f}%)<extra>Click for details</extra>"
+            ))
+            fig.update_geos(center={"lat":9.08,"lon":8.68}, projection_scale=5.0, showcountries=True, showland=True)
+            fig.update_layout(height=560, margin=dict(l=0,r=0,t=10,b=0), showlegend=False, clickmode="event+select")
+            event = st.plotly_chart(fig, use_container_width=True, on_select="rerun", selection_mode="points", key="agrow_state_intel_map_v2")
+
+    selected = st.session_state.get("agrow_selected_state_intel")
+    try:
+        pts = event.selection.points
+        if pts:
+            clicked = pts[0].get("hovertext") or pts[0].get("hover_name")
+            if not clicked and polygon_fig is not None:
+                clicked = polygon_names.get(str(pts[0].get("location")))
+            if clicked:
+                clicked = normalize_state_name(clicked)
+                selected = clicked
+                if st.session_state.get("agrow_selected_state_intel") != clicked:
+                    st.session_state["agrow_selected_state_intel"] = clicked
+                    # Sidebar was already rendered earlier in this Streamlit run.
+                    # Rerun once so its Viewing indicator reflects the new map selection.
+                    st.rerun()
+    except Exception:
+        pass
+    # Do not replace a selected zero-record state with FCT (or any other
+    # populated state). The selection is geographical, not data-dependent.
+    if not selected:
+        if selected_scope != "All Nigeria":
+            selected = scope_key
+        elif not agg.empty:
+            selected = agg.sort_values("Farmers", ascending=False).iloc[0]["State"]
+        else:
+            selected = "All Programme States"
+    # Compare canonical names rather than raw DB values: FCT can be stored as
+    # FCT, Abuja Federal Capital Territory, or Federal Capital Territory.
+    # The polygon's name is a display label, not necessarily the DB state value.
+    selected_key = normalize_state_name(selected)
+    sdf = base.loc[
+        base["state"].apply(normalize_state_name).eq(selected_key)
+    ].copy()
+
+    with left:
+        st.markdown(f"#### {selected}")
+        st.caption("State Intelligence Panel")
+        if sdf.empty:
+            st.info(f"No registered farmer records for {selected} in the current programme scope.")
+            z1, z2 = st.columns(2)
+            z1.metric("Farmers", "0")
+            z2.metric("Declared Land", "0.0 ha")
+            z3, z4 = st.columns(2)
+            z3.metric("Measured Land", "0.0 ha")
+            z4.metric("Measured Farms", "0")
+            z5, z6 = st.columns(2)
+            z5.metric("LGAs", "0")
+            z6.metric("Youth 18-35", "0")
+            z7, z8 = st.columns(2)
+            z7.metric("Commodities", "0")
+            z8.metric("Verified", "0")
+        else:
+            farmers = len(sdf)
+            land = pd.to_numeric(sdf.get("farm_size_ha", pd.Series(dtype=float)), errors="coerce").fillna(0).sum()
+            youth = int(sdf.get("Youth_18_35", pd.Series(dtype=bool)).fillna(False).sum())
+            youth_pct = round((youth/farmers)*100,1) if farmers else 0
+            selected_row = agg[agg["State"] == selected].iloc[0]
+            measured_land = float(selected_row.get("measured_land_ha", 0) or 0)
+            measured_farms = int(selected_row.get("measured_farms", 0) or 0)
+            measurement_coverage = float(selected_row.get("Measurement_Coverage_Pct", 0) or 0)
+            a,b = st.columns(2)
+            a.metric("Farmers", f"{farmers:,}")
+            b.metric("Declared Land", f"{land:,.1f} ha")
+            m1,m2 = st.columns(2)
+            m1.metric("Measured Land", f"{measured_land:,.1f} ha")
+            m2.metric("Measured Farms", f"{measured_farms:,}", f"{measurement_coverage:.1f}% coverage")
+            c,d = st.columns(2)
+            c.metric("LGAs", int(sdf["lga"].nunique()) if "lga" in sdf else 0)
+            d.metric("Youth 18-35", f"{youth:,}", f"{youth_pct}%")
+            e,f = st.columns(2)
+            e.metric("Commodities", int(sdf["primary_crop"].nunique()) if "primary_crop" in sdf else 0)
+            verified = int(sdf.get("nin_status", pd.Series(dtype=str)).fillna("").eq("Verified").sum())
+            f.metric("Verified", f"{verified:,}")
+
+            panel_tabs = st.tabs(["People", "Production", "Programmes", "Evidence"])
+            with panel_tabs[0]:
+                gender_norm = sdf.get("gender", pd.Series(index=sdf.index, dtype=str)).fillna("").astype(str).str.strip().str.title()
+                ages = pd.to_numeric(sdf.get("Age", pd.Series(index=sdf.index, dtype=float)), errors="coerce")
+                youth_mask = ages.between(18, 35, inclusive="both")
+                adult_mask = ages.ge(36)
+                under18_mask = ages.lt(18)
+                youth_male = int((youth_mask & gender_norm.eq("Male")).sum())
+                youth_female = int((youth_mask & gender_norm.eq("Female")).sum())
+                adult_male = int((adult_mask & gender_norm.eq("Male")).sum())
+                adult_female = int((adult_mask & gender_norm.eq("Female")).sum())
+
+                st.caption("M&E Demographic Profile")
+                # Keep demographic cards readable inside the narrow State Intelligence panel.
+                m1, m2 = st.columns(2)
+                m1.metric("Youth Male (18-35)", youth_male)
+                m2.metric("Youth Female (18-35)", youth_female)
+                m3, m4 = st.columns(2)
+                m3.metric("Adult Male (36+)", adult_male)
+                m4.metric("Adult Female (36+)", adult_female)
+
+                me_profile = pd.DataFrame({
+                    "M&E Category": ["Youth Male (18-35)", "Youth Female (18-35)", "Adult Male (36+)", "Adult Female (36+)"],
+                    "Farmers": [youth_male, youth_female, adult_male, adult_female],
+                })
+                st.dataframe(me_profile, use_container_width=True, hide_index=True, height=180)
+                under18_count = int(under18_mask.sum())
+                if under18_count:
+                    st.caption(f"Under-18 records (reported separately, not included in youth/adult columns): {under18_count}")
+            with panel_tabs[1]:
+                if "primary_crop" in sdf:
+                    st.dataframe(sdf["primary_crop"].fillna("Not stated").value_counts().rename("Farmers"), use_container_width=True, height=210)
+            with panel_tabs[2]:
+                if "programme_name" in sdf:
+                    st.dataframe(sdf["programme_name"].replace("","Not assigned").fillna("Not assigned").value_counts().rename("Farmers"), use_container_width=True, height=180)
+                st.caption("Normalized programme/input transactions will progressively replace legacy farmer-level input fields.")
+            with panel_tabs[3]:
+                photos = int(sdf.get("photo_status", pd.Series(dtype=str)).fillna("").eq("Captured").sum())
+                st.write(f"NIN verified: **{verified:,}** · Photos captured: **{photos:,}**")
+
+            if st.button(f"Explore {selected} LGAs →", key="explore_state_lgas", type="primary", use_container_width=True):
+                st.session_state["agrow_explore_lga"] = True
+            if st.session_state.get("agrow_explore_lga"):
+                lgas = sorted([str(x) for x in sdf.get("lga", pd.Series(dtype=str)).dropna().unique() if str(x).strip()])
+                if lgas:
+                    chosen_lga = st.selectbox("LGA drill-down", lgas, key="command_centre_lga")
+                    ldf = sdf[sdf["lga"].astype(str) == chosen_lga]
+                    lga_fig = lga_map(selected, chosen_lga)
+                    if lga_fig is not None:
+                        st.plotly_chart(lga_fig, use_container_width=True, key="agrow_lga_polygon_map")
+                        st.caption("LGA administrative polygons (not surveyed farm boundaries).")
+
+                    st.caption(f"{chosen_lga}: {len(ldf):,} farmers · {ldf.get('community_village', pd.Series(dtype=str)).nunique()} communities · {ldf.get('primary_crop', pd.Series(dtype=str)).nunique()} commodities")
+                    if "community_village" in ldf:
+                        st.dataframe(ldf["community_village"].replace("","Not stated").fillna("Not stated").value_counts().rename("Farmers"), use_container_width=True, height=180)
+
+    st.caption("Map ↔ intelligence synchronization is the Command Centre foundation. Declared land comes from farmer onboarding; Measured Land comes from captured farm records and should become the operational basis for production planning as GPS polygon measurement is completed.")
+
 def _classify_sync_receipts(receipts_df: pd.DataFrame) -> pd.DataFrame:
     """Classify historical FAILED receipts as RESOLVED once the same farmer+agent later syncs.
 
@@ -1555,7 +2088,7 @@ def _build_agent_performance(farmers_df: pd.DataFrame, receipts_df: pd.DataFrame
     """Build registration + device-sync performance from fresh authoritative data."""
     receipt_perf = pd.DataFrame()
     register_perf = pd.DataFrame()
-    today_date = pd.Timestamp.now().date()
+    today_date = pd.Timestamp.now(tz="Africa/Lagos").date()
 
     if receipts_df is not None and not receipts_df.empty:
         rp = _classify_sync_receipts(receipts_df)
@@ -1698,7 +2231,7 @@ def render_live_sync_monitor(selected_state, role, user_id):
                 .dropna().astype(str).replace("", pd.NA).dropna().nunique()
             )
 
-        today_date = pd.Timestamp.now().date()
+        today_date = pd.Timestamp.now(tz="Africa/Lagos").date()
         today_success = receipts_work.loc[
             synced_mask & receipts_work["received_at_dt"].dt.date.eq(today_date)
         ]
@@ -1991,6 +2524,9 @@ if "last_created_agent_id" not in st.session_state:
 # online / offline + sync monitor
 if "db_online" not in st.session_state:
     st.session_state["db_online"] = True
+
+if "force_offline_mode" not in st.session_state:
+    st.session_state["force_offline_mode"] = False
 
 if "last_auto_sync" not in st.session_state:
     st.session_state["last_auto_sync"] = None
@@ -3578,14 +4114,164 @@ else:
 
     state_options = sorted(list(NIGERIA_LGA_MAP.keys()))
 
-    if role == "admin":
-        selected_state = st.sidebar.selectbox("Region Focus", ["All Nigeria"] + state_options)
-        view_label = "All Nigeria" if selected_state == "All Nigeria" else normalize_state_name(selected_state)
-        st.sidebar.success(f"Viewing: {view_label}")
-        st.info(f"📍 Administrator View: {view_label}")
+    ensure_default_programme_access(user_id, role, user_meta)
+    programme_memberships = _programme_access_rows(user_id)
+    programme_choices = {}
+    for m in programme_memberships:
+        programme_choices[m["programme_code"]] = m["programme_name"]
+    if programme_choices:
+        programme_codes = list(programme_choices.keys())
+        active_programme_code = st.sidebar.selectbox(
+            "Active Programme", programme_codes,
+            format_func=lambda c: programme_choices.get(c,c), key="active_programme_code"
+        )
     else:
-        selected_state = user_meta.get("state", "All Nigeria")
+        active_programme_code = None
+        st.sidebar.warning("No active programme assignment. Registration access is restricted.")
+
+    geo_auth = get_geographic_authorisation(role, user_meta, user_id, active_programme_code)
+    active_organisation_code = geo_auth.get("organisation_code") or "DATADEV-DEMO"
+    st.session_state["active_organisation_code"] = active_organisation_code
+    st.sidebar.caption(f"Tenant: {active_organisation_code}")
+    if role == "admin":
+        with st.sidebar.expander("🛡️ Programme Access Control"):
+            st.caption("Create a client/organisation, programme geography and assignment. Effective access is Organisation × Programme × Role × Geography.")
+            try:
+                with get_engine().connect() as _c:
+                    _org_rows = _c.execute(text("SELECT organisation_code,organisation_name FROM organisations WHERE COALESCE(status,'Active')='Active' ORDER BY organisation_name")).fetchall()
+                _org_map = {r[0]: r[1] for r in _org_rows}
+            except Exception:
+                _org_map = {"DATADEV-DEMO":"DataDev / AGROW Demo"}
+            pac_org = st.selectbox("Client / Organisation", list(_org_map.keys()), format_func=lambda c: _org_map.get(c,c), key="pac_org")
+            new_org_name = st.text_input("New client / organisation (optional)", key="pac_new_org")
+            if st.button("Create Client / Organisation", key="pac_create_org", width="stretch"):
+                _name = new_org_name.strip()
+                if not _name:
+                    st.error("Enter the client / organisation name.")
+                else:
+                    _code = "ORG-" + re.sub(r'[^A-Z0-9]+','-',_name.upper()).strip('-')[:36]
+                    with get_engine().begin() as _c:
+                        _c.execute(text("INSERT INTO organisations(organisation_code,organisation_name,organisation_type,status,created_at) VALUES(:c,:n,'CLIENT','Active',:d) ON CONFLICT(organisation_code) DO UPDATE SET organisation_name=:n,status='Active'"), {"c":_code,"n":_name,"d":datetime.now(ZoneInfo("Africa/Lagos")).isoformat(timespec="seconds")})
+                    st.success(f"Client created: {_name} ({_code}). Refresh to assign a programme.")
+            pac_name = st.text_input("Programme name", key="pac_name")
+            pac_scope = st.selectbox("Scope type", ["STATE", "MULTI_STATE", "NATIONAL"], key="pac_scope")
+            if pac_scope == "NATIONAL":
+                pac_states = sorted(NIGERIA_LGA_MAP.keys())
+                st.caption("All Nigeria states/FCT will be authorised.")
+            else:
+                pac_states = st.multiselect("Authorised states", sorted(NIGERIA_LGA_MAP.keys()), key="pac_states")
+            try:
+                with get_engine().connect() as _c:
+                    _users = [r[0] for r in _c.execute(text("SELECT id FROM users ORDER BY id")).fetchall()]
+            except Exception:
+                _users = [user_id]
+            pac_user = st.selectbox("Assign user", _users, key="pac_user")
+
+            # Role choices are programme-scope aware. A central/national role is only
+            # offered where the programme geography supports it.
+            if pac_scope == "NATIONAL":
+                role_options = ["NATIONAL_ADMIN", "PROGRAMME_ADMIN", "STATE_ADMIN", "AGENT"]
+            elif pac_scope == "MULTI_STATE":
+                role_options = ["PROGRAMME_ADMIN", "STATE_ADMIN", "AGENT"]
+            else:
+                role_options = ["STATE_ADMIN", "PROGRAMME_ADMIN", "AGENT"]
+            role_labels = {
+                "NATIONAL_ADMIN": "National Programme Administrator",
+                "PROGRAMME_ADMIN": "Central / Programme Administrator",
+                "STATE_ADMIN": "State Administrator",
+                "AGENT": "Field Agent",
+            }
+            pac_access_role = st.selectbox(
+                "Programme role", role_options,
+                format_func=lambda r: role_labels.get(r, r), key="pac_access_role"
+            )
+
+            assignment_state = ""
+            pac_lga = ""
+            if pac_access_role in {"STATE_ADMIN", "AGENT"}:
+                assignment_state = st.selectbox(
+                    "Assigned State", pac_states, key="pac_assignment_state"
+                ) if pac_states else ""
+            if pac_access_role == "AGENT" and assignment_state:
+                allowed_lga_options = sorted(NIGERIA_LGA_MAP.get(assignment_state, []))
+                pac_lga = st.selectbox(
+                    "Assigned LGA", allowed_lga_options, key="pac_assignment_lga"
+                ) if allowed_lga_options else ""
+
+            if pac_access_role in {"NATIONAL_ADMIN", "PROGRAMME_ADMIN"}:
+                st.caption("This role covers the programme's authorised geography. State/LGA is not manually assigned.")
+            elif pac_access_role == "STATE_ADMIN":
+                st.caption("This administrator is restricted to the selected State within this programme.")
+            else:
+                st.caption("This field agent is restricted to the selected State and LGA within this programme.")
+            if st.button("Save Programme Assignment", key="pac_save", width="stretch"):
+                clean_name = pac_name.strip()
+                if not clean_name:
+                    st.error("Enter a programme name.")
+                elif not pac_states:
+                    st.error("Select at least one authorised state.")
+                elif pac_access_role=="NATIONAL_ADMIN" and pac_scope!="NATIONAL":
+                    st.error("National Programme Administrator is only valid for a NATIONAL programme.")
+                elif pac_access_role=="STATE_ADMIN" and not assignment_state:
+                    st.error("Select the State assigned to this State Administrator.")
+                elif pac_access_role=="AGENT" and (not assignment_state or not str(pac_lga).strip()):
+                    st.error("Select both the State and LGA assigned to this Agent.")
+                else:
+                    code = (pac_org + "-PRG-" + re.sub(r'[^A-Z0-9]+','-',clean_name.upper()).strip('-'))[:64]
+                    now = datetime.now(ZoneInfo("Africa/Lagos")).isoformat(timespec="seconds")
+                    with get_engine().begin() as _c:
+                        _c.execute(text("INSERT INTO programmes(programme_code,programme_name,organisation_code,scope_type,status,created_at) VALUES(:c,:n,:o,:s,'Active',:d) ON CONFLICT(programme_code) DO UPDATE SET programme_name=:n, organisation_code=:o, scope_type=:s, status='Active'"), {"c":code,"n":clean_name,"o":pac_org,"s":pac_scope,"d":now})
+                        _c.execute(text("DELETE FROM programme_states WHERE programme_code=:c"), {"c":code})
+                        for _state in pac_states:
+                            _c.execute(text("INSERT INTO programme_states(programme_code,state) VALUES(:c,:s) ON CONFLICT(programme_code,state) DO NOTHING"), {"c":code,"s":_normalise_scope_state(_state)})
+                        _c.execute(text("DELETE FROM user_programme_access WHERE UPPER(username)=UPPER(:u) AND programme_code=:c"), {"u":pac_user,"c":code})
+                        if pac_access_role in {"NATIONAL_ADMIN", "PROGRAMME_ADMIN"}:
+                            _c.execute(text("INSERT INTO user_programme_access(username,programme_code,access_role,state,lga) VALUES(:u,:c,:r,NULL,NULL)"), {"u":pac_user,"c":code,"r":pac_access_role})
+                        else:
+                            _state = _normalise_scope_state(assignment_state)
+                            _c.execute(text("INSERT INTO user_programme_access(username,programme_code,access_role,state,lga) VALUES(:u,:c,:r,:s,:l)"), {"u":pac_user,"c":code,"r":pac_access_role,"s":_state,"l":str(pac_lga).strip() or None})
+                        org_role = "CLIENT_ADMIN" if pac_access_role in {"NATIONAL_ADMIN", "PROGRAMME_ADMIN"} else pac_access_role
+                        _c.execute(text("INSERT INTO user_organisation_access(username,organisation_code,access_role) VALUES(:u,:o,:r) ON CONFLICT(username,organisation_code) DO UPDATE SET access_role=:r"), {"u":pac_user,"o":pac_org,"r":org_role})
+                    log_action(user_id, "PROGRAMME_ACCESS_UPDATED", f"{pac_org} / {clean_name} / {pac_user} / {pac_access_role}")
+                    st.success("Programme scope and assignment saved. Refresh/select the programme to apply it.")
+    if role == "admin" and geo_auth["scope"] in {"NATIONAL", "MULTI_STATE"}:
+        all_label = "All Programme States"
+        selected_scope = st.sidebar.selectbox("Region Focus", [all_label] + geo_auth["states"])
+        selected_state = "All Nigeria" if selected_scope == all_label else selected_scope
+        view_label = all_label if selected_scope == all_label else normalize_state_name(selected_scope)
+        # The Region Focus dropdown controls the data filter; a map click is a
+        # drill-down within that scope, not a change to programme authorisation.
+        map_focus = st.session_state.get("agrow_selected_state_intel")
+        scope_matches = st.session_state.get("agrow_map_scope_last") == normalize_state_name(selected_state)
+        allowed_map_states = {normalize_state_name(s) for s in geo_auth["states"]}
+        if scope_matches and map_focus in allowed_map_states and (selected_state == "All Nigeria" or map_focus == normalize_state_name(selected_state)):
+            st.sidebar.success(f"Viewing: {map_focus} (map selection)")
+            if selected_state == "All Nigeria":
+                st.sidebar.caption("Region Focus filter: All Programme States")
+        else:
+            st.sidebar.success(f"Viewing: {view_label}")
+        st.sidebar.caption(f"Programme Scope: {geo_auth['scope'].replace('_',' ').title()} • {len(geo_auth['states'])} state(s)")
+        st.info(f"📍 Programme Administrator View: {geo_auth['programme_name']} — {view_label}")
+    elif role == "admin":
+        selected_state = geo_auth["states"][0] if geo_auth["states"] else ""
+        st.sidebar.success(f"Viewing: {normalize_state_name(selected_state)}")
+        st.sidebar.caption(f"Programme Scope: State • {geo_auth['programme_name']}")
+        st.info(f"📍 State Programme Administrator View: {normalize_state_name(selected_state)}")
+    else:
+        selected_state = geo_auth["states"][0] if geo_auth["states"] else ""
         st.sidebar.info(f"Access restricted to {normalize_state_name(selected_state)}")
+        st.sidebar.caption(f"Programme: {geo_auth['programme_name']}")
+
+    # Persistent geographic identity for every administrator and agent dashboard view.
+    _scope_title = "ALL PROGRAMME STATES" if selected_state == "All Nigeria" else normalize_state_name(selected_state).upper()
+    _role_title = "ADMINISTRATOR" if role == "admin" else "FIELD AGENT"
+    st.markdown(
+        f'<div style="background:#155c35;color:white;padding:15px 22px;'
+        f'border-radius:12px;margin:10px 0 16px 0;box-shadow:0 2px 8px #0002">'
+        f'<div style="font-size:12px;font-weight:700;letter-spacing:1px">'
+        f'AGROW GEOGRAPHIC COMMAND CENTRE · {_role_title}</div>'
+        f'<div style="font-size:clamp(23px,3vw,36px);font-weight:900">'
+        f'📍 {_scope_title}</div></div>', unsafe_allow_html=True)
 
     st.markdown(
         """
@@ -3610,10 +4296,40 @@ else:
     st.info("⚠️ Demo Mode: Sample data displayed for presentation purposes")
     st.caption("Powered by DataDev Limited | Agricultural Value-Chain Infrastructure")
 
-    if is_db_available():
-        st.success("🟢 ONLINE MODE: Data syncing to central database")
-    else:
-        st.warning("🟡 OFFLINE MODE: Data stored locally and will sync later")
+    # Operator-controlled connectivity mode. This queues new registrations when
+    # Offline is selected; true no-network mobile capture remains in AGROW Field.
+    mode_col, status_col = st.columns([1.15, 3.85], vertical_alignment="center")
+    with mode_col:
+        force_offline = st.toggle(
+            "Work Offline",
+            value=st.session_state.get("force_offline_mode", False),
+            help="Queue new farmer registrations instead of writing them directly to the main database. The Streamlit server must still be running; use AGROW Field for true no-network capture.",
+            key="connectivity_mode_toggle",
+        )
+        st.session_state["force_offline_mode"] = bool(force_offline)
+    with status_col:
+        if st.session_state.get("force_offline_mode", False):
+            st.warning("🟡 OFFLINE / QUEUE MODE: New farmer registrations are queued for later sync.")
+        elif is_db_available():
+            st.success("🟢 ONLINE MODE: Connected to the main database.")
+        else:
+            st.error("🔴 CONNECTION UNAVAILABLE: Switch to Offline / Queue Mode for controlled capture.")
+
+    if (not st.session_state.get("force_offline_mode", False)) and is_db_available():
+        try:
+            qdf = fetch_offline_queue()
+            pending_count = int(qdf["sync_status"].isin(["PENDING","FAILED"]).sum()) if not qdf.empty else 0
+        except Exception:
+            pending_count = 0
+        if pending_count:
+            q1, q2 = st.columns([3,1])
+            q1.info(f"{pending_count} queued registration(s) are waiting for synchronization.")
+            if q2.button("Sync Queue", key="sync_manual_offline_queue", use_container_width=True):
+                synced, failed = sync_offline_queue()
+                st.session_state["last_sync_message"] = f"Queue sync complete: {synced} synced, {failed} failed."
+                st.rerun()
+    if st.session_state.get("last_sync_message"):
+        st.caption(st.session_state["last_sync_message"])
 
     if role == "admin":
         st.markdown("### 🌐 AGROW Platform Access")
@@ -3645,7 +4361,7 @@ else:
     df = fetch_farmers()
 
     if selected_state != "All Nigeria" and not df.empty:
-        df = df[df["state"] == selected_state]
+        df = df[df["state"].astype(str).apply(normalize_state_name) == normalize_state_name(selected_state)]
 
     if role == "agent" and not df.empty:
         df = df[df["agent_id"] == user_id]
@@ -3677,6 +4393,9 @@ else:
             st.caption("Headline registration metrics and sync activity refresh automatically every 10 seconds. Use Refresh Live Data for an immediate full dashboard update.")
 
         render_live_dashboard_overview(selected_state, role, user_id)
+        render_advisory_strip(selected_state)
+        st.divider()
+        render_interactive_state_intelligence(df, selected_state)
 
         if role == "admin":
             st.markdown("### Admin Monitoring Snapshot")
@@ -3730,12 +4449,20 @@ else:
 
         st.divider()
 
-        st.subheader("Geospatial Mapping")
-        if not df.empty:
-            map_df = df.rename(columns={"latitude": "lat", "longitude": "lon"})
-            st.map(map_df)
+        st.subheader("Farm GPS Evidence Map")
+        if not df.empty and {"latitude", "longitude"}.issubset(df.columns):
+            map_df = df.copy()
+            map_df["latitude"] = pd.to_numeric(map_df["latitude"], errors="coerce")
+            map_df["longitude"] = pd.to_numeric(map_df["longitude"], errors="coerce")
+            map_df = map_df.dropna(subset=["latitude", "longitude"])
+            map_df = map_df[(map_df["latitude"].abs() > 0.000001) | (map_df["longitude"].abs() > 0.000001)]
+            if not map_df.empty:
+                st.map(map_df.rename(columns={"latitude": "lat", "longitude": "lon"}))
+                st.caption("This map shows captured physical GPS evidence only. The Command Centre above uses administrative State/LGA registration for programme intelligence.")
+            else:
+                st.info("No genuine farm GPS evidence has been captured in this access scope yet.")
         else:
-            st.info("No field data available for mapping.")
+            st.info("No field data available for GPS mapping.")
 
         st.divider()
 
@@ -3871,7 +4598,23 @@ else:
         with identity_col1:
             gender = st.selectbox("Gender", ["Male", "Female"], key=f"gender_{form_v}")
         with identity_col2:
-            dob = st.date_input("Date of Birth", key=f"dob_{form_v}")
+            dob = st.date_input(
+                "Date of Birth",
+                value=None,
+                min_value=date(1900, 1, 1),
+                max_value=datetime.now(ZoneInfo("Africa/Lagos")).date(),
+                format="DD/MM/YYYY",
+                key=f"dob_{form_v}",
+                help="Select the farmer's actual date of birth. Years from 1900 to the current date are supported.",
+            )
+        age_years = calculate_age_years(dob)
+        age_col1, age_col2 = st.columns(2)
+        with age_col1:
+            st.text_input("Age (years) — calculated", value=str(age_years if age_years is not None else ""), disabled=True, key=f"age_display_{form_v}")
+        with age_col2:
+            youth_label = "Youth (18-35)" if age_years is not None and 18 <= age_years <= 35 else ("Non-youth (programme default)" if age_years is not None else "")
+            st.text_input("M&E Age Classification", value=youth_label, disabled=True, key=f"youth_display_{form_v}")
+        st.caption("Age is derived from Date of Birth for M&E reporting. The default youth band is 18-35 and can be configured for a specific programme definition.")
 
         st.markdown("---")
         st.markdown("### Section 2: Contact Information")
@@ -3889,19 +4632,24 @@ else:
 
         st.markdown("---")
         st.markdown("### Section 3: Coverage and Location")
-        if role == "admin":
-            farmer_state = st.selectbox("State", state_options, key=f"farmer_state_{form_v}")
+        registration_auth = get_geographic_authorisation(role, user_meta, user_id, active_programme_code)
+        if role == "admin" and registration_auth["scope"] in {"NATIONAL", "MULTI_STATE"}:
+            farmer_state = st.selectbox("State", registration_auth["states"], key=f"farmer_state_{form_v}")
+            st.caption(f"{registration_auth['scope'].replace('_',' ').title()} programme scope: registration is permitted only across this programme’s authorised states.")
         else:
-            farmer_state = user_meta.get("state", "")
-            st.text_input("State", value=farmer_state, disabled=True, key=f"farmer_state_display_{form_v}")
+            farmer_state = registration_auth["states"][0] if registration_auth["states"] else user_meta.get("state", "")
+            st.text_input("State", value=normalize_state_name(farmer_state), disabled=True, key=f"farmer_state_display_{form_v}")
 
-        lga_list = NIGERIA_LGA_MAP.get(farmer_state, [])
-        if role == "admin":
-            farmer_lga = st.selectbox("LGA", lga_list if lga_list else ["N/A"], key=f"farmer_lga_{form_v}")
-        else:
-            assigned_lga = user_meta.get("lga_coverage", "")
-            farmer_lga = assigned_lga if assigned_lga in lga_list or assigned_lga else (lga_list[0] if lga_list else "N/A")
+        # NIGERIA_LGA_MAP may store FCT as FCT while display normalization uses the full name.
+        lga_lookup_state = "FCT" if farmer_state == "Federal Capital Territory" and "FCT" in NIGERIA_LGA_MAP else farmer_state
+        lga_list = NIGERIA_LGA_MAP.get(lga_lookup_state, [])
+        if role == "agent":
+            assigned_lga = str(user_meta.get("lga_coverage", "") or "").strip()
+            farmer_lga = assigned_lga
             st.text_input("LGA", value=farmer_lga, disabled=True, key=f"farmer_lga_display_{form_v}")
+            st.caption("Field Agent geography is locked to the authorised State/LGA assignment.")
+        else:
+            farmer_lga = st.selectbox("LGA", lga_list if lga_list else ["N/A"], key=f"farmer_lga_{form_v}")
 
         location_col1, location_col2 = st.columns(2)
         with location_col1:
@@ -3942,9 +4690,8 @@ else:
                 "Support Priority", ["Not Assessed", "High", "Medium", "Low"], key=f"support_priority_{form_v}"
             )
         with support_col2:
-            programme_name = st.text_input(
-                "Programme / Intervention Name (Optional)", key=f"programme_name_{form_v}"
-            )
+            programme_name = registration_auth.get("programme_name") or ""
+            st.text_input("Programme / Intervention", value=programme_name, disabled=True, key=f"programme_name_display_{form_v}")
         support_already_delivered = st.checkbox(
             "Support has already been delivered under this programme", key=f"support_delivered_flag_{form_v}"
         )
@@ -4014,7 +4761,7 @@ else:
         with geo_col2:
             longitude = st.number_input("Longitude", format="%.6f", key=lon_key)
 
-        if role == "agent" and latitude and longitude:
+        if latitude and longitude:
             geofence_result = gps_matches_assigned_state(farmer_state, float(latitude), float(longitude))
             if geofence_result is False:
                 st.error(f"GPS is outside the broad {normalize_state_name(farmer_state)} operating envelope.")
@@ -4045,6 +4792,8 @@ else:
         if submitted:
             if not farmer_full_name.strip():
                 st.error("Farmer full name is required.")
+            elif dob is None:
+                st.error("Date of Birth is required for age and M&E reporting.")
             elif not valid_phone(phone_number):
                 st.error("Phone Number must be exactly 11 digits.")
             elif alternate_phone and not valid_phone(alternate_phone):
@@ -4053,13 +4802,15 @@ else:
                 st.error("NIN must be exactly 11 digits.")
             elif not valid_id_number(id_number):
                 st.error("ID Number must be between 1 and 20 characters.")
+            elif not registration_geography_allowed(role, user_meta, farmer_state, farmer_lga, user_id, active_programme_code)[0]:
+                st.error("Submission blocked: " + registration_geography_allowed(role, user_meta, farmer_state, farmer_lga, user_id, active_programme_code)[1])
             elif not farmer_lga or farmer_lga == "N/A":
                 st.error("LGA is required.")
             elif photo_capture is None:
                 st.error("Farmer photo capture is required.")
             elif latitude == 0.0 and longitude == 0.0:
                 st.error("Capture the farm GPS location before submission. Allow browser location access and try again.")
-            elif role == "agent" and gps_matches_assigned_state(farmer_state, float(latitude), float(longitude)) is False:
+            elif gps_matches_assigned_state(farmer_state, float(latitude), float(longitude)) is False:
                 st.error("Submission blocked: GPS is outside the agent's assigned-state operating envelope.")
             elif not record_confirmed:
                 st.error("Please confirm that the farmer's information has been reviewed before submission.")
@@ -4083,6 +4834,8 @@ else:
                         st.stop()
 
                 row = {
+                    "Organisation_Code": registration_auth.get("organisation_code") or active_organisation_code,
+                    "Programme_Code": active_programme_code,
                     "Farmer_ID": farmer_id,
                     "Registration_Date": now.strftime("%Y-%m-%d %H:%M:%S"),
                     "Agent_ID": user_id,
@@ -4116,7 +4869,7 @@ else:
                     "Photo_Status": "Captured" if photo_path else "No Photo",
                 }
 
-                if is_db_available():
+                if is_operational_online():
                     insert_farmer(row)
                     log_action(user_id, "FARMER_REGISTERED", farmer_id)
                     success_text = "✅ Farmer record saved directly to the main database."

@@ -1,0 +1,8 @@
+{
+  "boundarySource": "GRID3",
+  "boundaryYearRepresented": "2022",
+  "boundaryLicense": "Creative Commons Attribution 4.0 International (CC BY 4.0)",
+  "licenseSource": "data.grid3.org/datasets/grid3-nigeria-state-boundaries/explore?location=8.992006%2C8.685290%2C6.82",
+  "gjDownloadURL": "https://github.com/wmgeolab/geoBoundaries/raw/9469f09/releaseData/gbOpen/NGA/ADM1/geoBoundaries-NGA-ADM1.geojson",
+  "simplifiedGeometryGeoJSON": "https://github.com/wmgeolab/geoBoundaries/raw/9469f09/releaseData/gbOpen/NGA/ADM1/geoBoundaries-NGA-ADM1_simplified.geojson"
+}

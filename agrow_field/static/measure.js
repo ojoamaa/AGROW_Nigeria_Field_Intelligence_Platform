@@ -15,7 +15,91 @@ function stop(){if(watch!==null){navigator.geolocation.clearWatch(watch);watch=n
 $('start').onclick=()=>{if(!agent||!token)return alert('Log in from AGROW Field first.');if(!navigator.geolocation)return alert('Geolocation unavailable.');if(watch!==null)return;watch=navigator.geolocation.watchPosition(p=>{lastFix={lat:p.coords.latitude,lon:p.coords.longitude,accuracy_m:p.coords.accuracy,recorded_at:new Date(p.timestamp).toISOString()};$('gpsStatus').textContent=`Live GPS ±${Math.round(lastFix.accuracy_m)}m · ${points.length} points`;addFix(false)},e=>{$('gpsStatus').textContent='GPS error: '+e.message},{enableHighAccuracy:true,maximumAge:0,timeout:30000})};
 $('addPoint').onclick=()=>addFix(true);$('stop').onclick=stop;
 $('discard').onclick=()=>{if(confirm('Discard the current unsaved boundary walk?')){stop();points=[];lastFix=null;update()}};
-async function loadFarmers(){const rs=(await storeAll('records')).filter(x=>x.sync_status==='SYNCED'&&x.state===agent?.state&&x.farmer_id);const sel=$('farmer');sel.replaceChildren();for(const r of rs){const opt=document.createElement('option');opt.value=r.farmer_id;opt.textContent=`${r.farmer_full_name} · ${r.farmer_id}`;sel.append(opt)}if(!rs.length){const opt=document.createElement('option');opt.textContent='No locally synced farmers — sync registration first';opt.value='';sel.append(opt)}function show(){const r=rs.find(x=>x.farmer_id===sel.value);$('declared').textContent=r?`Declared farm size: ${Number(r.farm_size_ha||0).toFixed(2)} ha`:''}sel.onchange=show;show()}
+
+async function loadFarmers() {
+  const sel = $('farmer');
+  const local = await storeAll('records');
+
+  const farmers = new Map();
+
+  // Preserve locally synced registrations for offline operation.
+  for (const r of local) {
+    if (
+      r.sync_status === 'SYNCED' &&
+      r.farmer_id &&
+      r.state === agent?.state
+    ) {
+      farmers.set(r.farmer_id, r);
+    }
+  }
+
+  // Retrieve previously registered farmers from production.
+  if (navigator.onLine && token && agent) {
+    try {
+      const response = await fetch('/api/field/farmers/mine', {
+        headers: {
+          Authorization: 'Bearer ' + token
+        }
+      });
+
+      if (!response.ok) {
+        throw new Error('Server returned ' + response.status);
+      }
+
+      const data = await response.json();
+
+      for (const r of data.results || []) {
+        if (!r.farmer_id) continue;
+
+        const existing = farmers.get(r.farmer_id) || {};
+        farmers.set(r.farmer_id, {
+          ...existing,
+          ...r,
+          farmer_full_name:
+            existing.farmer_full_name || r.farmer_full_name || '',
+          sync_status: 'SYNCED'
+        });
+      }
+    } catch (error) {
+      console.warn('Farmer retrieval failed:', error);
+      $('syncStatus').textContent =
+        'Could not retrieve server farmers. Local records remain available.';
+    }
+  }
+
+  const previous = sel.value;
+  sel.replaceChildren();
+
+  for (const r of farmers.values()) {
+    const opt = document.createElement('option');
+    opt.value = r.farmer_id;
+    opt.textContent =
+      (r.farmer_full_name || 'Registered farmer') +
+      ' · ' + r.farmer_id;
+    sel.append(opt);
+  }
+
+  if (!farmers.size) {
+    const opt = document.createElement('option');
+    opt.value = '';
+    opt.textContent = 'No synced farmers available';
+    sel.append(opt);
+  } else if (farmers.has(previous)) {
+    sel.value = previous;
+  }
+
+  function show() {
+    const r = farmers.get(sel.value);
+    $('declared').textContent = r
+      ? 'Declared farm size: ' +
+        Number(r.farm_size_ha || 0).toFixed(2) + ' ha'
+      : '';
+  }
+
+  sel.onchange = show;
+  show();
+}
+
 $('loadFarmers').onclick=loadFarmers;
 $('complete').onclick=async()=>{if(busy)return;stop();const farmer_id=$('farmer').value;if(!farmer_id)return alert('Select a previously synced farmer.');if(points.length<3)return alert('Capture at least 3 distinct boundary points.');const area=hectares(points);if(!Number.isFinite(area)||area<0.0001)return alert('Polygon area is too small or invalid.');if(distance(points[0],points.at(-1))>100)return alert('Finish near the first boundary point (within 100m) before closing.');if(!confirm(`Save GPS measurement of ${area.toFixed(4)} hectares for ${farmer_id}?\nThis is a field estimate pending verification.`))return;busy=true;try{const measurement={measurement_id:crypto.randomUUID(),farmer_id,points:points.map(p=>({...p})),capture_method:'WALK_GPS',completed_at:new Date().toISOString(),sync_status:'PENDING'};await storePut('measurements',measurement);points=[];lastFix=null;update();await renderQueue();$('syncStatus').textContent='Saved locally. Attempting immediate sync…';await syncPending()}catch(e){alert('Could not save: '+e.message)}finally{busy=false}};
 async function renderQueue(){const rs=await storeAll('measurements');const q=$('queue');q.replaceChildren();for(const r of rs){const item=document.createElement('div');item.className='status-box';item.textContent=`${r.farmer_id} · ${hectares(r.points).toFixed(4)} ha · ${r.sync_status}${r.error?' · '+r.error:''}${r.verification_status?' · '+r.verification_status:''}`;q.append(item)}if(!rs.length)q.textContent='No measurements saved on this device.'}

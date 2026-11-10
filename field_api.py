@@ -231,6 +231,53 @@ def sync(data:SyncPayload, authorization:Optional[str]=Header(None)):
             results.append({'farmer_id':r.farmer_id,'status':'FAILED','error':err})
     return {'results':results}
 
+@app.get('/api/field/farmers/mine')
+def my_field_farmers(authorization: Optional[str] = Header(None)):
+    agent_id = auth(authorization).strip().upper()
+
+    with get_engine().connect() as conn:
+        account = conn.execute(
+            text("""
+                SELECT id, role, state
+                FROM users
+                WHERE UPPER(id) = :agent_id
+                LIMIT 1
+            """),
+            {'agent_id': agent_id},
+        ).mappings().first()
+
+        if not account or str(account['role']).strip().lower() != 'agent':
+            raise HTTPException(403, 'Active agent account required')
+
+        rows = conn.execute(
+            text("""
+                SELECT farmer_id, agent_id, state, lga, farm_size_ha
+                FROM farmers
+                WHERE UPPER(agent_id) = :agent_id
+                  AND LOWER(TRIM(state)) = LOWER(TRIM(:state))
+                ORDER BY farmer_id
+                LIMIT 500
+            """),
+            {
+                'agent_id': agent_id,
+                'state': str(account['state'] or '').strip(),
+            },
+        ).mappings().all()
+
+    return {
+        'results': [
+            {
+                'farmer_id': str(r['farmer_id']),
+                'agent_id': str(r['agent_id']),
+                'state': str(r['state']),
+                'lga': str(r['lga'] or ''),
+                'farm_size_ha': float(r['farm_size_ha'] or 0),
+                'sync_status': 'SYNCED',
+            }
+            for r in rows
+        ]
+    }
+
 @app.get('/api/field/sync/receipts')
 def sync_receipts(authorization:Optional[str]=Header(None), limit:int=100):
     agent=auth(authorization)
